@@ -273,6 +273,7 @@ def ABCD(config):
     mask = np.isfinite(ae_bkg) & np.isfinite(con_bkg) & (ae_bkg > 0)
     axis1_bkg = ae_bkg[mask]    # AE reco loss  → x axis
     axis2_bkg = con_bkg[mask]   # contrastive MD → y axis
+    labels_masked = labels[mask]
     print(f"Events after masking: {mask.sum()}", flush=True)
 
     # ── ABCD scan ──
@@ -331,6 +332,49 @@ def ABCD(config):
     plt.close()
     wandb.log({"Hists2D/bkg": wandb.Image(out)})
 
+    # per-class scatter + individual hist2d
+    class_names  = {0: "DY", 1: "QCD", 2: "TT", 3: "WJets"}
+    class_colors = {0: "tab:blue", 1: "tab:orange", 2: "tab:green", 3: "tab:red"}
+
+    # combined scatter coloured by class
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for cls, name in class_names.items():
+        m = labels_masked == cls
+        if m.sum() == 0:
+            continue
+        ax.scatter(axis1_bkg[m], axis2_bkg[m], s=0.3, alpha=0.15,
+                   color=class_colors[cls], label=name, rasterized=True)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("AE reco loss", fontsize=fs)
+    ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
+    ax.set_title("AE vs Contrastive — all classes")
+    ax.legend(markerscale=10, fontsize=fs_leg)
+    out_combined = os.path.join(plot_dir, "hist2d_by_class_combined.png")
+    fig.savefig(out_combined, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    wandb.log({"Hists2D/by_class_combined": wandb.Image(out_combined)})
+
+    # individual hist2d per class
+    for cls, name in class_names.items():
+        m = labels_masked == cls
+        if m.sum() < 2:
+            continue
+        x_cls = axis1_bkg[m]
+        y_cls = axis2_bkg[m]
+        fig = plt.figure(figsize=(6, 5))
+        xbins_c = np.geomspace(x_cls[x_cls > 0].min(), x_cls.max(), 101)
+        ybins_c = np.geomspace(y_cls[y_cls > 0].min(), y_cls.max(), 101)
+        plt.hist2d(x_cls, y_cls, bins=[xbins_c, ybins_c], norm=LogNorm(vmin=1), cmin=1)
+        plt.xscale("log"); plt.yscale("log")
+        plt.xlabel("AE reco loss", fontsize=fs)
+        plt.ylabel("Contrastive score (MD)", fontsize=fs)
+        plt.title(f"AE vs Contrastive — {name}")
+        plt.colorbar(label="Counts")
+        out_cls = os.path.join(plot_dir, f"hist2d_{name}.png")
+        plt.savefig(out_cls, dpi=200, bbox_inches="tight")
+        plt.close()
+        wandb.log({f"Hists2D/{name}": wandb.Image(out_cls)})
+
     # profile: <AE> vs contrastive
     fig, ax = plt.subplots(figsize=fig_size)
     profile_plot(ax, axis2_bkg, axis1_bkg, nbins=60, logx=True)
@@ -357,6 +401,43 @@ def ABCD(config):
     fig.savefig(p2_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     wandb.log({"Profiles/contrastive_vs_AE": wandb.Image(p2_path)})
+
+    # per-class profile: <AE> vs contrastive MD
+    fig, ax = plt.subplots(figsize=fig_size)
+    for cls, name in class_names.items():
+        m = labels_masked == cls
+        if m.sum() < 20:
+            continue
+        profile_plot(ax, axis2_bkg[m], axis1_bkg[m], nbins=40, logx=True, label=name)
+    ax.set_xlabel("Contrastive score (MD)", fontsize=fs)
+    ax.set_ylabel("Mean AE reco loss",      fontsize=fs)
+    ax.set_yscale("log")
+    ax.set_title("⟨AE loss⟩ vs contrastive MD (by class)")
+    ax.legend(fontsize=fs_leg)
+    plt.tick_params(axis='x', labelsize=fs_leg)
+    plt.tick_params(axis='y', labelsize=fs_leg)
+    p3_path = os.path.join(plot_dir, "profile_AE_vs_contrastive_by_class.png")
+    fig.savefig(p3_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    wandb.log({"Profiles/AE_vs_contrastive_by_class": wandb.Image(p3_path)})
+
+    # per-class profile: <contrastive MD> vs AE
+    fig, ax = plt.subplots(figsize=fig_size)
+    for cls, name in class_names.items():
+        m = labels_masked == cls
+        if m.sum() < 20:
+            continue
+        profile_plot(ax, axis1_bkg[m], axis2_bkg[m], nbins=40, logx=True, label=name)
+    ax.set_xlabel("AE reco loss",                  fontsize=fs)
+    ax.set_ylabel("Mean contrastive score (MD)",   fontsize=fs)
+    ax.set_title("⟨contrastive MD⟩ vs AE loss (by class)")
+    ax.legend(fontsize=fs_leg)
+    plt.tick_params(axis='x', labelsize=fs_leg)
+    plt.tick_params(axis='y', labelsize=fs_leg)
+    p4_path = os.path.join(plot_dir, "profile_contrastive_vs_AE_by_class.png")
+    fig.savefig(p4_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    wandb.log({"Profiles/contrastive_vs_AE_by_class": wandb.Image(p4_path)})
 
     # 1D scan for closure + S/sqrt(B)
     effs, closure_ratio, closure_unc, s_over_sqrtb = [], [], [], []
