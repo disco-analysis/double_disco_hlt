@@ -268,6 +268,11 @@ def ABCD(config):
     else:
         raise ValueError("No AE scores available: checkpoint has no 'ae' key and --ae_scores_bkg_test not provided.")
 
+    # free GPU memory from AE before loading contrastive model
+    gc.collect()
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
     # ── compute contrastive MD scores ──
     con_bkg, labels, md_mu, md_inv_cov, encoder, projector = compute_md_scores(
         config["contrast_ckpt"],
@@ -288,6 +293,9 @@ def ABCD(config):
     # ── signal inference (optional) ──
     sig_axis1 = sig_axis2 = None
     if config.get("signal_pt"):
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
         print("Running signal inference...", flush=True)
         sig_embeddings, _ = embed_dataset(encoder, projector, config["signal_pt"], device)
         sig_con = mahalanobis_scores(sig_embeddings, md_mu, md_inv_cov)
