@@ -12,7 +12,7 @@ hyperparameters:
   lr: 0.001
   lr_min: 0.0
   lr_warmup: 0.05
-  batch_size: 1024
+  batch_size: 512
   num_heads: 8
   num_layers: 4
   embed_size: 128
@@ -23,7 +23,7 @@ hyperparameters:
   contrastive_weight: 0.05
   contrastive_max: 0.10
   contrastive_warmup: 0.05
-  mixed_prec: false
+  mixed_prec: true
   # double DisCo: joint AE + contrastive training
   disco_weight: 1.0
   ae_reco_weight: 1.0
