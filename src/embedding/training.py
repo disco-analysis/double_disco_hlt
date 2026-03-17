@@ -77,16 +77,28 @@ def build_train_val_loaders(
     val_loader   = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=0)
     return train_loader, val_loader
 
-def _proxy_md(embeddings, labels, qcd_label=1):
+def _proxy_md(embeddings, labels, ema_centroid, qcd_label=1, ema_decay=0.99):
     """
-    Cosine distance from the QCD centroid in the (L2-normalized) embedding space.
-    Returns a [B] scalar tensor per event.
+    Cosine distance from an EMA QCD centroid in the (L2-normalized) embedding space.
+    Updates and returns (proxy_md [B], updated ema_centroid).
+    Using an EMA centroid rather than a per-batch centroid gives a stabler, less
+    noisy proxy that better approximates the global Mahalanobis distance used at eval.
     """
     qcd_mask = (labels == qcd_label)
-    if qcd_mask.sum() > 1:
-        centroid = F.normalize(embeddings[qcd_mask].mean(dim=0), dim=0)
-        return 1.0 - (embeddings * centroid).sum(dim=1)
-    return torch.zeros(embeddings.size(0), device=embeddings.device)
+    with torch.no_grad():
+        if qcd_mask.sum() > 1:
+            batch_centroid = F.normalize(embeddings[qcd_mask].detach().mean(dim=0), dim=0)
+            if ema_centroid is None:
+                ema_centroid = batch_centroid
+            else:
+                ema_centroid = F.normalize(
+                    ema_decay * ema_centroid + (1 - ema_decay) * batch_centroid, dim=0
+                )
+    if ema_centroid is not None:
+        proxy = 1.0 - (embeddings * ema_centroid).sum(dim=1)
+    else:
+        proxy = torch.zeros(embeddings.size(0), device=embeddings.device)
+    return proxy, ema_centroid
 
 
 def train_epoch(
@@ -117,6 +129,7 @@ def train_epoch(
     scheduled_contrst_wght = not (isinstance(contrastive_weight, int) or isinstance(contrastive_weight, float))
     class_metrics = ClassificationMetrics(num_classes)
     mse_no_reduce = torch.nn.MSELoss(reduction="none")
+    ema_centroid = None  # EMA QCD centroid for proxy MD, updated each batch
 
     for batch in train_loader:
         if len(batch) == 4:
@@ -164,7 +177,7 @@ def train_epoch(
                 if disco_weight > 0.0:
                     qcd_mask = (labels == qcd_label)
                     if qcd_mask.sum() > 10:
-                        proxy_md = _proxy_md(embeddings, labels, qcd_label)
+                        proxy_md, ema_centroid = _proxy_md(embeddings, labels, ema_centroid, qcd_label)
                         nw = torch.ones(qcd_mask.sum(), device=device)
                         loss_disco = distance_corr(
                             ae_reco_per_event[qcd_mask],
