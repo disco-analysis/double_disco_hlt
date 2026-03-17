@@ -127,17 +127,11 @@ def compute_ae_scores(ckpt, test_pt_path, device="cpu", batch_size=4096):
 # Contrastive model: embed + Mahalanobis
 # ─────────────────────────────────────────────
 
-def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
-    """
-    Runs encoder+projector on test_pt_path, fits a Mahalanobis reference
-    on QCD (label==1) embeddings, and returns per-event MD scores for all events.
-    """
-    print("Loading checkpoint...", flush=True)
-    ckpt = torch.load(ckpt_path, map_location=device)
+def build_contrastive_model(ckpt, device="cpu"):
+    """Build encoder + projector from a loaded checkpoint dict."""
     enc_sd  = ckpt["encoder"]
     proj_sd = ckpt["projector"]
 
-    # infer architecture from checkpoint
     embed_size = int(enc_sd["cls_token"].shape[-1]) if "cls_token" in enc_sd \
         else int(enc_sd["input_proj.weight"].shape[0])
     latent_dim = int(enc_sd["bottleneck.weight"].shape[0])
@@ -152,13 +146,12 @@ def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
     )
     pairwise = ckpt.get("pairwise", False)
 
-    # detect Linformer (LinearAttentionLayer) from e_proj/f_proj keys
     linformer = any("self_attn.e_proj" in k for k in enc_sd)
     if linformer:
         e_proj_key = next(k for k in enc_sd if k.endswith("self_attn.e_proj.weight"))
         w = enc_sd[e_proj_key]
         linear_dim  = int(w.shape[0])
-        num_tokens  = int(w.shape[1]) - 1  # TransformerEncoder adds 1 for CLS token internally
+        num_tokens  = int(w.shape[1]) - 1
     else:
         linear_dim = None
         num_tokens = None
@@ -184,25 +177,26 @@ def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
     ).to(device).eval()
 
     projector = Projector(latent_dim, proj_dim, hidden_dim=(proj_dim * 4)).to(device).eval()
-
     encoder.load_state_dict(enc_sd)
     projector.load_state_dict(proj_sd)
 
     print(f"  embed_size={embed_size}, latent_dim={latent_dim}, "
           f"num_heads={num_heads}, num_layers={num_layers}, pairwise={pairwise}", flush=True)
+    return encoder, projector
 
-    # load test data
-    data = torch.load(test_pt_path, map_location="cpu")
-    pf     = data["pf"]      # [N, 400, 7]
-    labels = data["label"]   # [N]
+
+def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=4096):
+    """Run encoder+projector on a .pt file, return (embeddings [N, D], labels [N])."""
+    data = torch.load(pt_path, map_location="cpu")
+    pf     = data["pf"]
+    labels = data["label"]
     N = pf.shape[0]
-
-    print(f"  Running inference on {N} events...", flush=True)
+    print(f"  Running inference on {N} events from {pt_path}...", flush=True)
     embeddings = []
     with torch.no_grad():
         for i0 in range(0, N, batch_size):
             xb = pf[i0:i0 + batch_size].to(device)
-            mask = (xb.abs().sum(-1) == 0)  # [B, T] padding mask
+            mask = (xb.abs().sum(-1) == 0)
             mask = torch.cat([
                 torch.zeros(mask.size(0), 1, device=device, dtype=torch.bool),
                 mask
@@ -210,21 +204,36 @@ def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
             latent = encoder(xb, None, mask)
             z = F.normalize(projector(latent), dim=1)
             embeddings.append(z.cpu())
+    return torch.cat(embeddings, dim=0).numpy(), labels.numpy()
 
-    embeddings = torch.cat(embeddings, dim=0).numpy()  # [N, proj_dim]
+
+def mahalanobis_scores(embeddings, mu, inv_cov):
+    diffs = embeddings - mu
+    return np.einsum("bi,ij,bj->b", diffs, inv_cov, diffs).astype(np.float32)
+
+
+def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
+    """
+    Runs encoder+projector on test_pt_path, fits a Mahalanobis reference
+    on QCD (label==1) embeddings, and returns per-event MD scores for all events.
+    Also returns the fitted (mu, inv_cov) and model objects for reuse on signal.
+    """
+    print("Loading checkpoint...", flush=True)
+    ckpt = torch.load(ckpt_path, map_location=device)
+    encoder, projector = build_contrastive_model(ckpt, device)
+
+    embeddings, labels = embed_dataset(encoder, projector, test_pt_path, device, batch_size)
 
     # fit reference on QCD (label==1)
-    qcd_mask = (labels.numpy() == 1)
+    qcd_mask = (labels == 1)
     ref = embeddings[qcd_mask]
     print(f"  Fitting Mahalanobis on {qcd_mask.sum()} QCD events...", flush=True)
-
     mu = ref.mean(axis=0)
     cov = np.cov(ref, rowvar=False) + 1e-6 * np.eye(ref.shape[1])
     inv_cov = np.linalg.inv(cov)
 
-    diffs = embeddings - mu
-    md = np.einsum("bi,ij,bj->b", diffs, inv_cov, diffs).astype(np.float32)
-    return md, labels.numpy()
+    md = mahalanobis_scores(embeddings, mu, inv_cov)
+    return md, labels, mu, inv_cov, encoder, projector
 
 
 # ─────────────────────────────────────────────
@@ -260,7 +269,7 @@ def ABCD(config):
         raise ValueError("No AE scores available: checkpoint has no 'ae' key and --ae_scores_bkg_test not provided.")
 
     # ── compute contrastive MD scores ──
-    con_bkg, labels = compute_md_scores(
+    con_bkg, labels, md_mu, md_inv_cov, encoder, projector = compute_md_scores(
         config["contrast_ckpt"],
         config["contrast_test_pt"],
         device=device,
@@ -275,6 +284,18 @@ def ABCD(config):
     axis2_bkg = con_bkg[mask]   # contrastive MD → y axis
     labels_masked = labels[mask]
     print(f"Events after masking: {mask.sum()}", flush=True)
+
+    # ── signal inference (optional) ──
+    sig_axis1 = sig_axis2 = None
+    if config.get("signal_pt"):
+        print("Running signal inference...", flush=True)
+        sig_embeddings, _ = embed_dataset(encoder, projector, config["signal_pt"], device)
+        sig_con = mahalanobis_scores(sig_embeddings, md_mu, md_inv_cov)
+        sig_ae  = compute_ae_scores(ckpt, config["signal_pt"], device=device)
+        sig_mask = np.isfinite(sig_ae) & np.isfinite(sig_con) & (sig_ae > 0)
+        sig_axis1 = sig_ae[sig_mask]
+        sig_axis2 = sig_con[sig_mask]
+        print(f"Signal events after masking: {sig_mask.sum()}", flush=True)
 
     # ── ABCD scan ──
     percent = np.linspace(0.75, 0.98, 24)
@@ -336,7 +357,7 @@ def ABCD(config):
     class_names  = {0: "DY", 1: "QCD", 2: "TT", 3: "WJets"}
     class_colors = {0: "tab:blue", 1: "tab:orange", 2: "tab:green", 3: "tab:red"}
 
-    # combined scatter coloured by class
+    # combined scatter coloured by class (+ signal overlay)
     fig, ax = plt.subplots(figsize=(6, 5))
     for cls, name in class_names.items():
         m = labels_masked == cls
@@ -344,6 +365,9 @@ def ABCD(config):
             continue
         ax.scatter(axis1_bkg[m], axis2_bkg[m], s=0.3, alpha=0.15,
                    color=class_colors[cls], label=name, rasterized=True)
+    if sig_axis1 is not None:
+        ax.scatter(sig_axis1, sig_axis2, s=0.5, alpha=0.4,
+                   color="tab:purple", label="TpTp", rasterized=True)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("AE reco loss", fontsize=fs)
     ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
@@ -353,6 +377,22 @@ def ABCD(config):
     fig.savefig(out_combined, dpi=200, bbox_inches="tight")
     plt.close(fig)
     wandb.log({"Hists2D/by_class_combined": wandb.Image(out_combined)})
+
+    # individual hist2d for signal
+    if sig_axis1 is not None:
+        fig = plt.figure(figsize=(6, 5))
+        xbins_s = np.geomspace(sig_axis1[sig_axis1 > 0].min(), sig_axis1.max(), 101)
+        ybins_s = np.geomspace(sig_axis2[sig_axis2 > 0].min(), sig_axis2.max(), 101)
+        plt.hist2d(sig_axis1, sig_axis2, bins=[xbins_s, ybins_s], norm=LogNorm(vmin=1), cmin=1)
+        plt.xscale("log"); plt.yscale("log")
+        plt.xlabel("AE reco loss", fontsize=fs)
+        plt.ylabel("Contrastive score (MD)", fontsize=fs)
+        plt.title("AE vs Contrastive — TpTp (signal)")
+        plt.colorbar(label="Counts")
+        out_sig = os.path.join(plot_dir, "hist2d_TpTp.png")
+        plt.savefig(out_sig, dpi=200, bbox_inches="tight")
+        plt.close()
+        wandb.log({"Hists2D/TpTp": wandb.Image(out_sig)})
 
     # individual hist2d per class
     for cls, name in class_names.items():
@@ -520,6 +560,8 @@ if __name__ == "__main__":
     parser.add_argument("--contrast_test_pt",   required=True)
     parser.add_argument("--ae_scores_bkg_test", default=None,
                         help="Pre-computed AE scores .pt file. Not needed if checkpoint contains a joint AE.")
+    parser.add_argument("--signal_pt", default=None,
+                        help="Optional signal .pt file for inference overlay on 2D histogram.")
     parser.add_argument("--outdir",             default="outputs_abcd")
     parser.add_argument("--min_A", type=int,    default=200)
     parser.add_argument("--min_D", type=int,    default=1000)
