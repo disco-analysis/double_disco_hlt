@@ -27,6 +27,8 @@ hyperparameters:
   # double DisCo: joint AE + contrastive training
   disco_weight: 1.0
   closure_weight: 1.0
+  disco_warmup: 0.2
+  closure_warmup: 0.2
   ae_reco_weight: 1.0
   ae_latent: 16
   ae_enc_nodes: [512, 256]

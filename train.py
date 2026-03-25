@@ -9,7 +9,7 @@ import wandb
 import numpy as np
 from embedding.models import TransformerEncoder, Projector
 from embedding.autoencoder import Autoencoder
-from embedding.training import make_train_val_split, build_train_val_loaders, train_epoch, validate_epoch, EarlyStopping, cosine_schedule_with_warmup, cosine_constrastive_schedule
+from embedding.training import make_train_val_split, build_train_val_loaders, train_epoch, validate_epoch, EarlyStopping, cosine_schedule_with_warmup, cosine_constrastive_schedule, linear_warmup_weight
 from embedding.utils.data_utils import compute_normalization_constants
 from embedding.utils.cfg_handler import train_config, data_config
 from embedding.utils.data_utils import compute_class_weights, load_data
@@ -105,9 +105,11 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
     # The AE operates on object-level features (pt, η, φ, type_id for each PF candidate,
     # all concatenated into a flat vector). It is only built and trained when disco_weight > 0.
     # When disco_weight == 0, this whole block is skipped and ae_model stays None.
-    disco_weight   = cfg.hp("disco_weight", 0.0)    # weight on the DisCo decorrelation term
-    closure_weight = cfg.hp("closure_weight", 0.0)  # weight on the ABCD closure loss
-    ae_reco_weight = cfg.hp("ae_reco_weight", 1.0)  # weight on the AE reconstruction loss
+    disco_weight    = cfg.hp("disco_weight",    0.0)  # weight on the DisCo decorrelation term
+    closure_weight  = cfg.hp("closure_weight",  0.0)  # weight on the ABCD closure loss
+    ae_reco_weight  = cfg.hp("ae_reco_weight",  1.0)  # weight on the AE reconstruction loss
+    disco_warmup    = cfg.hp("disco_warmup",    0.0)  # fraction of total steps to ramp disco from 0
+    closure_warmup  = cfg.hp("closure_warmup",  0.0)  # fraction of total steps to ramp closure from 0
     obj_tr = obj_val = None
     ae_model = None
     if disco_weight > 0.0 or closure_weight > 0.0:
@@ -232,6 +234,18 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
             total_steps = total_steps
         )
 
+    # ── DisCo / Closure weight schedulers ─────────────────────────────────────
+    # Ramp from 0 so CE/contrastive can establish a good latent space first
+    if disco_warmup > 0.0 and disco_weight > 0.0:
+        disco_schedule = linear_warmup_weight(disco_weight, int(disco_warmup * total_steps))
+    else:
+        disco_schedule = disco_weight
+
+    if closure_warmup > 0.0 and closure_weight > 0.0:
+        closure_schedule = linear_warmup_weight(closure_weight, int(closure_warmup * total_steps))
+    else:
+        closure_schedule = closure_weight
+
     # ── Training loop ──────────────────────────────────────────────────────────
     best_val = float("inf")
     es = EarlyStopping(patience=patience, mode="min", min_delta=0.0)
@@ -260,8 +274,8 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
             scaler=scaler,
             ae_model=ae_model,
             ae_reco_weight=ae_reco_weight,
-            disco_weight=disco_weight,
-            closure_weight=closure_weight,
+            disco_weight=disco_schedule,
+            closure_weight=closure_schedule,
         )
         # Evaluation pass — no gradients, no weight updates
         va = validate_epoch(
@@ -325,7 +339,9 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
                 "Val Accuracy": va["acc"],
                 # to track change in hps
                 "Learning Rate": scheduler.get_last_lr()[0],
-                "Contrastive Weight": contrastive_weight if contrastive_max is None else contrastive_schedule.get()
+                "Contrastive Weight": contrastive_weight if contrastive_max is None else contrastive_schedule.get(),
+                "DisCo Weight": disco_schedule if isinstance(disco_schedule, float) else disco_schedule.get(),
+                "Closure Weight": closure_schedule if isinstance(closure_schedule, float) else closure_schedule.get(),
             }, step=epoch
         )
 

@@ -198,7 +198,9 @@ def train_epoch(
 
     total_loss = total_contrast = total_ce = total_ae = total_disco = total_closure = 0.0
     count = 0
-    scheduled_contrst_wght = not (isinstance(contrastive_weight, int) or isinstance(contrastive_weight, float))
+    scheduled_contrst_wght  = not (isinstance(contrastive_weight, int) or isinstance(contrastive_weight, float))
+    scheduled_disco_wght    = not (isinstance(disco_weight,        int) or isinstance(disco_weight,        float))
+    scheduled_closure_wght  = not (isinstance(closure_weight,      int) or isinstance(closure_weight,      float))
     class_metrics = ClassificationMetrics(num_classes)
     mse_no_reduce = torch.nn.MSELoss(reduction="none")
 
@@ -246,29 +248,32 @@ def train_epoch(
                 loss = loss + ae_reco_weight * loss_ae
 
         # ── DisCo + closure: computed outside autocast for float32 numerical stability ──
+        disco_weight_value   = disco_weight.get()   if scheduled_disco_wght   else disco_weight
+        closure_weight_value = closure_weight.get() if scheduled_closure_wght else closure_weight
+
         loss_disco   = torch.tensor(0.0, device=device)
         loss_closure = torch.tensor(0.0, device=device)
-        if ae_model is not None and ae_reco_per_event is not None and (disco_weight > 0.0 or closure_weight > 0.0):
+        if ae_model is not None and ae_reco_per_event is not None and (disco_weight_value > 0.0 or closure_weight_value > 0.0):
             qcd_mask = (labels == qcd_label)
             if qcd_mask.sum() > 10:
                 proxy_md = _proxy_md(latent, labels, qcd_label)
                 nw = torch.ones(qcd_mask.sum(), device=device)
 
-                if disco_weight > 0.0:
+                if disco_weight_value > 0.0:
                     loss_disco = distance_corr(
                         ae_reco_per_event[qcd_mask].float(),
                         proxy_md[qcd_mask].float(),
                         nw,
                     )
-                    loss = loss + disco_weight * loss_disco
+                    loss = loss + disco_weight_value * loss_disco
 
-                if closure_weight > 0.0:
+                if closure_weight_value > 0.0:
                     loss_closure = closure_loss_batch(
                         ae_reco_per_event[qcd_mask].float(),
                         proxy_md[qcd_mask].float(),
                         nw,
                     )
-                    loss = loss + closure_weight * loss_closure
+                    loss = loss + closure_weight_value * loss_closure
 
         all_params = (
             list(encoder.parameters()) +
@@ -291,6 +296,10 @@ def train_epoch(
             scheduler.step()
         if scheduled_contrst_wght:
             contrastive_weight.step()
+        if scheduled_disco_wght:
+            disco_weight.step()
+        if scheduled_closure_wght:
+            closure_weight.step()
 
         bs = x.size(0)
         total_loss     += loss.item() * bs
@@ -404,6 +413,31 @@ def cosine_schedule_with_warmup(
         progress = (step - warmup_steps) / (total_steps - warmup_steps)
         return (1/lr) * (lr - lr_delta * 0.5 * (1 - math.cos(math.pi * progress)))
     return LambdaLR(optimizer, lr_lambda)
+
+class linear_warmup_weight:
+    """
+    Linearly ramps a weight from 0 to target over warmup_steps, then holds at target.
+    Step once per optimizer step (i.e., per batch).
+    """
+    def __init__(self, target: float, warmup_steps: int):
+        self.target = target
+        self.warmup_steps = warmup_steps
+        self._step = 0
+        self.current_weight = self._compute(0)
+
+    def _compute(self, step: int) -> float:
+        if self.warmup_steps == 0:
+            return self.target
+        return self.target * min(1.0, step / self.warmup_steps)
+
+    def step(self) -> float:
+        self._step += 1
+        self.current_weight = self._compute(self._step)
+        return self.current_weight
+
+    def get(self) -> float:
+        return self.current_weight
+
 
 class cosine_constrastive_schedule:
     """
