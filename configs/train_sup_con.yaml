@@ -12,7 +12,7 @@ hyperparameters:
   lr: 0.001
   lr_min: 0.0
   lr_warmup: 0.05
-  batch_size: 512
+  batch_size: 1024
   num_heads: 8
   num_layers: 4
   embed_size: 128
