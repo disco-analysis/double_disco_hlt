@@ -61,6 +61,7 @@ class InfoNCELoss(nn.Module):
         device = features.device
         batch_size = features.size(0)
 
+        features = features.float()
         features = F.normalize(features, dim=1)
         sim_matrix = torch.matmul(features, features.T) / self.temperature
 
@@ -125,6 +126,10 @@ class SupConLoss(nn.Module):
         device = (torch.device('cuda')
                   if features.is_cuda
                   else torch.device('cpu'))
+
+        # Always compute in float32: with temperature=0.05 and float16,
+        # exp(-40) underflows to 0 making clamp(min=1e-8) ineffective → log(0) = -inf → NaN
+        features = features.float()
 
         if len(features.shape) < 3:
             # raise ValueError('`features` needs to be [bsz, n_views, ...],'
