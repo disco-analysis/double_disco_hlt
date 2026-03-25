@@ -101,26 +101,37 @@ def sigmoid_counts(var1, var2, cut1, cut2, weights, scale=100.0):
 
 
 def closure_loss_batch(var1, var2, weights, symmetrize=True,
-                       n_events_min=10, max_tries=20):
+                       n_events_min=10, max_tries=20, scale=50.0):
     """
     ABCD closure loss on a batch.
-    Picks random cuts within 1-99% quantile range, computes soft ABCD counts
-    via sigmoid, returns |NA*ND - NB*NC| / (NA*ND + NB*NC).
+    Normalizes both variables to their 1-99% quantile range (→ [0,1]) before
+    computing soft ABCD counts, so the sigmoid scale is meaningful regardless
+    of the variables' absolute scale (important when var2 is Mahalanobis distance).
+    Returns |NA*ND - NB*NC| / (NA*ND + NB*NC).
     """
     v1 = var1.view(-1)
     v2 = var2.view(-1)
     w  = weights.view(-1)
 
+    with torch.no_grad():
+        x_min = torch.quantile(v1, 0.01).item()
+        x_max = torch.quantile(v1, 0.99).item()
+        y_min = torch.quantile(v2, 0.01).item()
+        y_max = torch.quantile(v2, 0.99).item()
+
+    x_range = x_max - x_min + 1e-8
+    y_range = y_max - y_min + 1e-8
+
+    # Normalize to [0, 1] so sigmoid scale is consistent across variables
+    v1_n = (v1 - x_min) / x_range
+    v2_n = (v2 - y_min) / y_range
+
     for _ in range(max_tries):
         with torch.no_grad():
-            x_min = torch.quantile(v1, 0.01).item()
-            x_max = torch.quantile(v1, 0.99).item()
-            y_min = torch.quantile(v2, 0.01).item()
-            y_max = torch.quantile(v2, 0.99).item()
-            cut1 = np.random.uniform(x_min, x_max)
-            cut2 = np.random.uniform(y_min, y_max)
+            cut1 = np.random.uniform(0.0, 1.0)
+            cut2 = np.random.uniform(0.0, 1.0)
 
-        NA, NB, NC, ND = sigmoid_counts(v1, v2, cut1, cut2, w)
+        NA, NB, NC, ND = sigmoid_counts(v1_n, v2_n, cut1, cut2, w, scale=scale)
 
         if (NA.item() > n_events_min and NB.item() > n_events_min and
                 NC.item() > n_events_min and ND.item() > n_events_min):
