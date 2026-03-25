@@ -89,9 +89,12 @@ class LinearAttentionLayer(nn.Module):
 
         K_prime = self.e_proj(K.transpose(2, 3)).transpose(2, 3) # B,H,linear_dim,head_dim
         V_prime = self.f_proj(V.transpose(2, 3)).transpose(2, 3) # B,H,linear_dim,head_dim
-        
-        scores = torch.matmul(Q, K_prime.transpose(-2, -1)) / math.sqrt(self.head_dim)  # (B,H,N,head_dim)x(B,H,head_dim,linear_dim) => B,H,N,linear_dim
-        
+
+        # cast to float32 for attention: Q@K matmul and softmax can overflow in float16
+        # with large embed_size/num_heads after many training epochs
+        Q32, K_prime32, V_prime32 = Q.float(), K_prime.float(), V_prime.float()
+        scores = torch.matmul(Q32, K_prime32.transpose(-2, -1)) / math.sqrt(self.head_dim)  # B,H,N,linear_dim
+
         if self.pairwise: # add pairwise bias only if enabled
             if pairwise_feats is None:
                 raise ValueError("pairwise_feats must be provided when pairwise is True")
@@ -99,10 +102,10 @@ class LinearAttentionLayer(nn.Module):
             bias_logits = bias_logits.permute(0, 3, 1, 2)  # (B, H, N, N)
             bias_logits_prime = self.e_proj(bias_logits) # NEW. B,H,N,linear_dim
 
-            scores = scores + bias_logits_prime
+            scores = scores + bias_logits_prime.float()
 
-        attn = torch.softmax(scores, dim=-1)  # B,H,N,linear_dim
-        out = torch.matmul(attn, V_prime)  # (B,H,N,linear_dim)x(B,H,linear_dim,head_dim) => B,H,N,head_dim
+        attn = torch.softmax(scores, dim=-1)  # B,H,N,linear_dim (float32)
+        out = torch.matmul(attn, V_prime32).to(Q.dtype)  # cast back for the rest of the network
 
         out = out.transpose(1, 2).contiguous().view(B, N, E)
         out = self.out_proj(out)

@@ -185,14 +185,14 @@ def build_contrastive_model(ckpt, device="cpu"):
     return encoder, projector
 
 
-def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=4096):
-    """Run encoder+projector on a .pt file, return (embeddings [N, D], labels [N])."""
+def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=512):
+    """Run encoder on a .pt file, return (latents [N, D], labels [N])."""
     data = torch.load(pt_path, map_location="cpu")
     pf     = data["pf"]
     labels = data["label"]
     N = pf.shape[0]
     print(f"  Running inference on {N} events from {pt_path}...", flush=True)
-    embeddings = []
+    latents = []
     with torch.no_grad():
         for i0 in range(0, N, batch_size):
             xb = pf[i0:i0 + batch_size].to(device)
@@ -202,9 +202,8 @@ def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=4096):
                 mask
             ], dim=1)
             latent = encoder(xb, None, mask)
-            z = F.normalize(projector(latent), dim=1)
-            embeddings.append(z.cpu())
-    return torch.cat(embeddings, dim=0).numpy(), labels.numpy()
+            latents.append(latent.cpu())
+    return torch.cat(latents, dim=0).numpy(), labels.numpy()
 
 
 def mahalanobis_scores(embeddings, mu, inv_cov):
@@ -212,7 +211,7 @@ def mahalanobis_scores(embeddings, mu, inv_cov):
     return np.einsum("bi,ij,bj->b", diffs, inv_cov, diffs).astype(np.float32)
 
 
-def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
+def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=512):
     """
     Runs encoder+projector on test_pt_path, fits a Mahalanobis reference
     on QCD (label==1) embeddings, and returns per-event MD scores for all events.
@@ -229,7 +228,8 @@ def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=4096):
     ref = embeddings[qcd_mask]
     print(f"  Fitting Mahalanobis on {qcd_mask.sum()} QCD events...", flush=True)
     mu = ref.mean(axis=0)
-    cov = np.cov(ref, rowvar=False) + 1e-6 * np.eye(ref.shape[1])
+    centered = ref - mu
+    cov = (centered.T @ centered) / ref.shape[0] + 1e-6 * np.eye(ref.shape[1])
     inv_cov = np.linalg.inv(cov)
 
     md = mahalanobis_scores(embeddings, mu, inv_cov)
@@ -269,9 +269,12 @@ def ABCD(config):
         raise ValueError("No AE scores available: checkpoint has no 'ae' key and --ae_scores_bkg_test not provided.")
 
     # free GPU memory from AE before loading contrastive model
+    del ckpt
     gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
+    # reload checkpoint for contrastive model (ckpt was deleted above)
+    ckpt = torch.load(config["contrast_ckpt"], map_location=device)
 
     # ── compute contrastive MD scores ──
     con_bkg, labels, md_mu, md_inv_cov, encoder, projector = compute_md_scores(
@@ -285,10 +288,17 @@ def ABCD(config):
 
     # ── mask (finite, positive AE loss) ──
     mask = np.isfinite(ae_bkg) & np.isfinite(con_bkg) & (ae_bkg > 0)
-    axis1_bkg = ae_bkg[mask]    # AE reco loss  → x axis
-    axis2_bkg = con_bkg[mask]   # contrastive MD → y axis
+    axis1_bkg = ae_bkg[mask]    # AE reco loss  → x axis (all SM bkg, for plots)
+    axis2_bkg = con_bkg[mask]   # contrastive MD → y axis (all SM bkg, for plots)
     labels_masked = labels[mask]
     print(f"Events after masking: {mask.sum()}", flush=True)
+
+    # ── QCD-only arrays for ABCD scan and closure ──
+    # DisCo was trained to decorrelate only on QCD, so closure is most meaningful on QCD.
+    qcd_only  = labels_masked == 1
+    axis1_qcd = axis1_bkg[qcd_only]
+    axis2_qcd = axis2_bkg[qcd_only]
+    print(f"QCD events for ABCD: {qcd_only.sum()}", flush=True)
 
     # ── signal inference (optional) ──
     sig_axis1 = sig_axis2 = None
@@ -308,12 +318,12 @@ def ABCD(config):
     # ── ABCD scan ──
     percent = np.linspace(0.75, 0.98, 24)
     best    = {"nonclosure": np.inf}
-    min_A   = int(config.get("min_A", 200))
-    min_D   = int(config.get("min_D", 1000))
+    min_A   = int(config.get("min_A", 50))
+    min_D   = int(config.get("min_D", 500))
 
     for p1 in percent:
         for p2 in percent:
-            t1, t2, A, B, C, D = abcd_counts(axis1_bkg, axis2_bkg, p1, p2)
+            t1, t2, A, B, C, D = abcd_counts(axis1_qcd, axis2_qcd, p1, p2)
             if A < min_A or D < min_D:
                 continue
             nc, A_hat = nonclosure_A(A, B, C, D)
@@ -352,6 +362,8 @@ def ABCD(config):
     plt.hist2d(axis1_bkg, axis2_bkg, bins=[xbins, ybins], norm=LogNorm(vmin=1), cmin=1)
     plt.xscale("log")
     plt.yscale("log")
+    plt.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+    plt.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
     plt.xlabel("AE reco loss")
     plt.ylabel("Contrastive score (MD)")
     plt.title("AE vs Contrastive (bkg only)")
@@ -376,6 +388,8 @@ def ABCD(config):
     if sig_axis1 is not None:
         ax.scatter(sig_axis1, sig_axis2, s=0.5, alpha=0.4,
                    color="tab:purple", label="TpTp", rasterized=True)
+    ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+    ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("AE reco loss", fontsize=fs)
     ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
@@ -393,6 +407,8 @@ def ABCD(config):
         ybins_s = np.geomspace(sig_axis2[sig_axis2 > 0].min(), sig_axis2.max(), 101)
         plt.hist2d(sig_axis1, sig_axis2, bins=[xbins_s, ybins_s], norm=LogNorm(vmin=1), cmin=1)
         plt.xscale("log"); plt.yscale("log")
+        plt.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+        plt.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
         plt.xlabel("AE reco loss", fontsize=fs)
         plt.ylabel("Contrastive score (MD)", fontsize=fs)
         plt.title("AE vs Contrastive — TpTp (signal)")
@@ -414,6 +430,8 @@ def ABCD(config):
         ybins_c = np.geomspace(y_cls[y_cls > 0].min(), y_cls.max(), 101)
         plt.hist2d(x_cls, y_cls, bins=[xbins_c, ybins_c], norm=LogNorm(vmin=1), cmin=1)
         plt.xscale("log"); plt.yscale("log")
+        plt.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+        plt.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
         plt.xlabel("AE reco loss", fontsize=fs)
         plt.ylabel("Contrastive score (MD)", fontsize=fs)
         plt.title(f"AE vs Contrastive — {name}")
@@ -428,7 +446,6 @@ def ABCD(config):
     profile_plot(ax, axis2_bkg, axis1_bkg, nbins=60, logx=True)
     ax.set_xlabel("Contrastive score (MD)", fontsize=fs)
     ax.set_ylabel("Mean AE reco loss",      fontsize=fs)
-    ax.set_yscale("log")
     ax.set_title("⟨AE loss⟩ vs contrastive MD")
     plt.tick_params(axis='x', labelsize=fs_leg)
     plt.tick_params(axis='y', labelsize=fs_leg)
@@ -459,7 +476,6 @@ def ABCD(config):
         profile_plot(ax, axis2_bkg[m], axis1_bkg[m], nbins=40, logx=True, label=name)
     ax.set_xlabel("Contrastive score (MD)", fontsize=fs)
     ax.set_ylabel("Mean AE reco loss",      fontsize=fs)
-    ax.set_yscale("log")
     ax.set_title("⟨AE loss⟩ vs contrastive MD (by class)")
     ax.legend(fontsize=fs_leg)
     plt.tick_params(axis='x', labelsize=fs_leg)
@@ -489,10 +505,10 @@ def ABCD(config):
 
     # 1D scan for closure + S/sqrt(B)
     effs, closure_ratio, closure_unc, s_over_sqrtb = [], [], [], []
-    Ntot_bkg = float(len(axis1_bkg))
+    Ntot_bkg = float(len(axis1_qcd))
 
     for p in percent:
-        t1, t2, A, B, C, D = abcd_counts(axis1_bkg, axis2_bkg, p, p)
+        t1, t2, A, B, C, D = abcd_counts(axis1_qcd, axis2_qcd, p, p)
         A_hat  = (B * C) / max(D, 1e-8)
         ratio  = A_hat / max(A, 1e-8)
         invA   = 0.0 if A == 0 else 1.0 / A

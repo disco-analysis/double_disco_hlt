@@ -106,10 +106,11 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
     # all concatenated into a flat vector). It is only built and trained when disco_weight > 0.
     # When disco_weight == 0, this whole block is skipped and ae_model stays None.
     disco_weight   = cfg.hp("disco_weight", 0.0)    # weight on the DisCo decorrelation term
+    closure_weight = cfg.hp("closure_weight", 0.0)  # weight on the ABCD closure loss
     ae_reco_weight = cfg.hp("ae_reco_weight", 1.0)  # weight on the AE reconstruction loss
     obj_tr = obj_val = None
     ae_model = None
-    if disco_weight > 0.0:
+    if disco_weight > 0.0 or closure_weight > 0.0:
         raw = torch.load(data_path, map_location="cpu")
         obj_all = raw["obj"][:num_events if test_mode else raw["obj"].shape[0]]
         # Take 4 features per PF candidate and flatten: shape (N, n_cands*4)
@@ -260,6 +261,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
             ae_model=ae_model,
             ae_reco_weight=ae_reco_weight,
             disco_weight=disco_weight,
+            closure_weight=closure_weight,
         )
         # Evaluation pass — no gradients, no weight updates
         va = validate_epoch(
@@ -280,7 +282,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
 
         log_str = (
             f"Epoch {epoch+1}/{num_epochs} | "
-            f"Train: loss {tr['loss']:.6f}, Contrast {tr['contrast']:.6f}, CE {tr['ce']:.6f}, AE {tr['ae_reco']:.6f}, DisCo {tr['disco']:.6f}, acc {tr['acc']:.4f} | "
+            f"Train: loss {tr['loss']:.6f}, Contrast {tr['contrast']:.6f}, CE {tr['ce']:.6f}, AE {tr['ae_reco']:.6f}, DisCo {tr['disco']:.6f}, Closure {tr['closure']:.6f}, acc {tr['acc']:.4f} | "
             f"Val:   loss {va['loss']:.6f}, Contrast {va['contrast']:.6f}, CE {va['ce']:.6f}, AE {va['ae_reco']:.6f}, acc {va['acc']:.4f}"
         )
         logger.info(log_str)
@@ -314,6 +316,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
                 "Train CrossEntropy": tr["ce"],
                 "Train AE Reco": tr["ae_reco"],
                 "Train DisCo": tr["disco"],
+                "Train Closure": tr["closure"],
                 "Train Accuracy": tr["acc"],
                 "Val Loss": va["loss"],
                 "Val Contrastive": va["contrast"],
