@@ -101,13 +101,14 @@ def sigmoid_counts(var1, var2, cut1, cut2, weights, scale=100.0):
 
 
 def closure_loss_batch(var1, var2, weights, symmetrize=True,
-                       n_events_min=10, max_tries=20, scale=50.0):
+                       n_events_min=10, max_tries=20, scale=50.0, n_cuts=5):
     """
     ABCD closure loss on a batch.
     Normalizes both variables to their 1-99% quantile range (→ [0,1]) before
     computing soft ABCD counts, so the sigmoid scale is meaningful regardless
     of the variables' absolute scale (important when var2 is Mahalanobis distance).
-    Returns |NA*ND - NB*NC| / (NA*ND + NB*NC).
+    Averages over n_cuts random cuts to reduce gradient variance.
+    Returns mean of |NA*ND - NB*NC| / (NA*ND + NB*NC) over valid cuts.
     """
     v1 = var1.view(-1)
     v2 = var2.view(-1)
@@ -126,22 +127,25 @@ def closure_loss_batch(var1, var2, weights, symmetrize=True,
     v1_n = (v1 - x_min) / x_range
     v2_n = (v2 - y_min) / y_range
 
-    for _ in range(max_tries):
-        with torch.no_grad():
-            cut1 = np.random.uniform(0.0, 1.0)
-            cut2 = np.random.uniform(0.0, 1.0)
+    losses = []
+    for _ in range(n_cuts):
+        for _ in range(max_tries):
+            with torch.no_grad():
+                cut1 = np.random.uniform(0.0, 1.0)
+                cut2 = np.random.uniform(0.0, 1.0)
+            NA, NB, NC, ND = sigmoid_counts(v1_n, v2_n, cut1, cut2, w, scale=scale)
+            if (NA.item() > n_events_min and NB.item() > n_events_min and
+                    NC.item() > n_events_min and ND.item() > n_events_min):
+                break
+        else:
+            continue  # skip this cut if no valid split found
+        num = torch.abs(NA * ND - NB * NC)
+        den = (NA * ND + NB * NC + 1e-8) if symmetrize else (NB * NC + 1e-8)
+        losses.append(num / den)
 
-        NA, NB, NC, ND = sigmoid_counts(v1_n, v2_n, cut1, cut2, w, scale=scale)
-
-        if (NA.item() > n_events_min and NB.item() > n_events_min and
-                NC.item() > n_events_min and ND.item() > n_events_min):
-            break
-    else:
+    if not losses:
         return torch.tensor(0.0, device=var1.device, dtype=var1.dtype)
-
-    num = torch.abs(NA * ND - NB * NC)
-    den = (NA * ND + NB * NC + 1e-8) if symmetrize else (NB * NC + 1e-8)
-    return num / den
+    return torch.stack(losses).mean()
 
 
 def _proxy_md(latent, labels, qcd_label=1):
