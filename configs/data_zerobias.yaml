@@ -1,0 +1,23 @@
+ds_name: hlt_zerobias
+
+data_processing:
+  redir: ""
+  sample_dir: "/afs/cern.ch/user/e/escheull"
+  out_path:   "/eos/user/e/escheull/zerobias"
+
+  # --- PF candidates view (contrastive training input) ---
+  pfcands: true
+  n_objects: 400
+  sort_by_pt: true
+  sk_spacing: null
+
+  # --- dataset sizing ---
+  nevents_per_class: -1
+
+  # --- outputs ---
+  split: null
+  store_by_class: false
+
+  samples:
+    - ZB:
+      - first_ZB.txt

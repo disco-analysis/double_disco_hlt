@@ -153,12 +153,13 @@ class TransformerEncoderBlock(nn.Module):
 
 class TransformerEncoder(nn.Module):
     def __init__(
-            self, 
-            num_features: int, 
-            embed_size: int, 
-            latent_dim: int, 
-            num_heads: int = 8, 
+            self,
+            num_features: int,
+            embed_size: int,
+            latent_dim: int,
+            num_heads: int = 8,
             num_layers: int = 4,
+            dim_feedforward: int = 2048,
             linear_dim: Union[int, None] = None,
             num_tokens: Union[int, None] = None,
             pre_processor: Union[nn.Module, None] = None,
@@ -169,9 +170,10 @@ class TransformerEncoder(nn.Module):
         self.layers = nn.ModuleList(
             [
                 TransformerEncoderBlock(
-                    embed_size, 
-                    num_heads, 
-                    linear_dim=linear_dim, 
+                    embed_size,
+                    num_heads,
+                    dim_feedforward=dim_feedforward,
+                    linear_dim=linear_dim,
                     num_tokens=num_tokens+1 if num_tokens is not None else None,
                     pairwise=pairwise
                 ) for _ in range(num_layers)

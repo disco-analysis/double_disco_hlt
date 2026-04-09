@@ -1,7 +1,6 @@
 .ipynb_checkpoints/
 __pycache__/
 checkpoints/
-configs/
 wandb/
 plots/
 logs/
@@ -14,5 +13,4 @@ data/
 *.pdf
 *.pth
 *.ipynb
-*.yaml
 *.pt

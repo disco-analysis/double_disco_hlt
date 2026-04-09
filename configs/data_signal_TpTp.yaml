@@ -1,0 +1,13 @@
+ds_name: hlt_signal_TpTp
+
+data_processing:
+  sample_dir: /afs/cern.ch/user/e/escheull/
+  out_path: /eos/user/e/escheull/signal_pt/
+  n_objects: 400
+  nevents_per_class: -1
+  pfcands: true
+  sort_by_pt: true
+  also_save_objects: true
+  samples:
+    - TpTp:
+      - first_TpTp.txt

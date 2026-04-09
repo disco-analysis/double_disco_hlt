@@ -1,0 +1,11 @@
+ds_name: hlt_smcocktail_1M_noZB
+
+data_processing:
+  nevents_per_class: 250000
+  class_weights: inv_freq
+  pfcands: true
+  samples:
+    - DY: null
+    - QCD: null
+    - TT: null
+    - WJet: null

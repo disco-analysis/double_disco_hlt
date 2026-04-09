@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.decomposition import PCA
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
 from embedding.dataloader import PFCandsDataset, PUPPIDataset
@@ -148,28 +149,83 @@ def closure_loss_batch(var1, var2, weights, symmetrize=True,
     return torch.stack(losses).mean()
 
 
-def _proxy_md(latent, labels, qcd_label=1):
+@torch.no_grad()
+def fit_qcd_pca(encoder, projector, train_loader, norm_constants, pairwise, device,
+                n_components, use_l2_proxy_md=False, qcd_label=1):
     """
-    Squared Mahalanobis distance — same method as EmpiricalCovariance in eval.py:
-        cov = EmpiricalCovariance().fit(bkg_latents)
-        scores = cov.mahalanobis(X)  # sum((X - mu) @ precision * (X - mu), axis=1)
-    Fitted on QCD events in the current batch (detached).
-    Gradients flow through latent only.
+    Embed all training QCD events and fit PCA on the resulting vectors.
+    Returns (pca_mean, pca_components) as float32 tensors on device, plus explained variance.
+    Uses the same representation as _proxy_md (latent or projected embeddings).
+    """
+    encoder.eval(); projector.eval()
+    qcd_vecs = []
+    for batch in train_loader:
+        if len(batch) == 4:
+            x, mask, labels, _ = batch
+        else:
+            x, mask, labels = batch
+        x = x.to(device); mask = mask.to(device); labels = labels.to(device)
+        mask = torch.cat([
+            torch.zeros(mask.size(0), 1, device=device, dtype=torch.bool),
+            mask.bool()
+        ], dim=1)
+        delta_r = delta_r_from_normalized(x, norm_constants) if pairwise else None
+        latent = encoder(x, delta_r, mask)
+        vec = F.normalize(projector(latent), dim=1) if use_l2_proxy_md else latent
+        qcd_mask = (labels == qcd_label)
+        if qcd_mask.sum() > 0:
+            qcd_vecs.append(vec[qcd_mask].cpu().float())
+    encoder.train(); projector.train()
+
+    qcd_vecs = torch.cat(qcd_vecs, dim=0).numpy()
+    pca = PCA(n_components=n_components, whiten=True)
+    pca.fit(qcd_vecs)
+    explained = float(pca.explained_variance_ratio_.cumsum()[-1])
+
+    pca_mean  = torch.from_numpy(pca.mean_.astype(np.float32)).to(device)
+    pca_comps = torch.from_numpy(pca.components_.astype(np.float32)).to(device)
+    pca_stds  = torch.from_numpy(np.sqrt(pca.explained_variance_).astype(np.float32)).to(device)
+    return pca_mean, pca_comps, pca_stds, explained
+
+
+def _proxy_md(latent, labels, qcd_label=1, pca_mean=None, pca_comps=None, pca_stds=None):
+    """
+    Squared Mahalanobis distance proxy.  Gradients flow through latent only.
+
+    With PCA + whitening (pca_stds provided): projects into PCA space and divides by
+    per-component std (sqrt of eigenvalue), making the QCD covariance ~ identity.
+    MD then reduces to squared Euclidean distance, avoiding the precision matrix inversion.
+
+    Without whitening: falls back to explicit per-batch covariance inversion.
     """
     qcd_mask = (labels == qcd_label)
     if qcd_mask.sum() < 2:
         return torch.zeros(latent.size(0), device=latent.device)
 
-    with torch.no_grad():
-        bkg_latents = latent[qcd_mask].detach().float()
-        mu = bkg_latents.mean(0)
-        centered = bkg_latents - mu
-        cov = (centered.T @ centered) / bkg_latents.shape[0]
-        D = cov.shape[0]
-        precision = torch.linalg.inv(cov + 1e-6 * torch.eye(D, device=cov.device, dtype=cov.dtype))
+    # Project into PCA space; whitening divides by per-component std
+    if pca_mean is not None and pca_comps is not None:
+        vec = (latent.float() - pca_mean) @ pca_comps.T  # [B, n_components]
+        if pca_stds is not None:
+            vec = vec / pca_stds  # whiten: covariance ≈ identity → MD = ||x - mu||²
+    else:
+        vec = latent.float()
 
-    centered_all = latent.float() - mu
-    scores = torch.sum((centered_all @ precision) * centered_all, dim=1)
+    with torch.no_grad():
+        mu = vec[qcd_mask].detach().mean(0)
+
+    centered_all = vec - mu
+
+    if pca_stds is not None:
+        # Whitened space: MD = squared Euclidean distance (no matrix inversion needed)
+        scores = torch.sum(centered_all ** 2, dim=1)
+    else:
+        with torch.no_grad():
+            centered_bkg = centered_all[qcd_mask].detach()
+            cov = (centered_bkg.T @ centered_bkg) / centered_bkg.shape[0]
+            D = cov.shape[0]
+            precision = torch.linalg.inv(cov + 1e-6 * torch.eye(D, device=cov.device, dtype=cov.dtype))
+        scores = torch.sum((centered_all @ precision) * centered_all, dim=1)
+
     return scores.to(latent.dtype)
 
 
@@ -180,6 +236,7 @@ def train_epoch(
     optimizer, scheduler=None, contrastive_weight=0.05,
     pairwise=False, num_classes=4, scaler=None,
     ae_model=None, ae_reco_weight=1.0, disco_weight=0.0, closure_weight=0.0, qcd_label=1,
+    use_l2_proxy_md=False, pca_mean=None, pca_comps=None, pca_stds=None,
 ):
     """
     One training epoch.
@@ -256,7 +313,7 @@ def train_epoch(
         if ae_model is not None and ae_reco_per_event is not None and (disco_weight_value > 0.0 or closure_weight_value > 0.0):
             qcd_mask = (labels == qcd_label)
             if qcd_mask.sum() > 10:
-                proxy_md = _proxy_md(latent, labels, qcd_label)
+                proxy_md = _proxy_md(embeddings if use_l2_proxy_md else latent, labels, qcd_label, pca_mean, pca_comps, pca_stds)
                 nw = torch.ones(qcd_mask.sum(), device=device)
 
                 if disco_weight_value > 0.0:
@@ -320,6 +377,150 @@ def train_epoch(
         "closure":      total_closure  / count,
         **class_metrics.compute_metrics(),
     }
+
+def train_epoch_single_disco(
+    encoder, projector, classifier,
+    ce_loss_fn, contrastive_loss,
+    train_loader, norm_constants, device,
+    optimizer, scheduler=None, contrastive_weight=1.0,
+    pairwise=False, num_classes=4, scaler=None,
+    ae_model=None, disco_weight=0.0, closure_weight=0.0, qcd_label=1,
+    use_l2_proxy_md=False, pca_mean=None, pca_comps=None, pca_stds=None,
+):
+    """
+    Single DisCo training epoch.
+
+    AE is frozen (pre-trained, eval mode). Its reco loss is computed with no_grad
+    and used as axis 1 for DisCo/closure, but does NOT contribute to the total loss.
+    Only encoder, projector, and classifier parameters are updated.
+
+    Total loss = w_con*contrast + (1-w_con)*ce + disco_weight*disco + closure_weight*closure
+    """
+    encoder.train(); projector.train(); classifier.train()
+    if ae_model is not None:
+        ae_model.eval()
+
+    total_loss = total_contrast = total_ce = total_disco = total_closure = 0.0
+    count = 0
+    scheduled_contrst_wght = not (isinstance(contrastive_weight, int) or isinstance(contrastive_weight, float))
+    scheduled_disco_wght   = not (isinstance(disco_weight,        int) or isinstance(disco_weight,        float))
+    scheduled_closure_wght = not (isinstance(closure_weight,      int) or isinstance(closure_weight,      float))
+    class_metrics = ClassificationMetrics(num_classes)
+    mse_no_reduce = torch.nn.MSELoss(reduction="none")
+
+    for batch in train_loader:
+        if len(batch) == 4:
+            x, mask, labels, obj = batch
+            obj = obj.to(device)
+        else:
+            x, mask, labels = batch
+            obj = None
+
+        x = x.to(device)
+        mask = mask.to(device)
+        labels = labels.to(device)
+
+        mask = torch.cat([
+            torch.zeros(mask.size(0), 1, device=mask.device, dtype=torch.bool),
+            mask.bool()
+        ], dim=1)
+
+        delta_r = delta_r_from_normalized(x, norm_constants) if pairwise else None
+
+        use_amp = (device == "cuda") and (scaler is not None) and scaler.is_enabled()
+        optimizer.zero_grad()
+
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            # ── contrastive branch ──
+            latent = encoder(x, delta_r, mask)
+            embeddings = F.normalize(projector(latent), dim=1)
+
+            loss_contrast = contrastive_loss(embeddings, labels)
+            logits  = classifier(embeddings)
+            loss_ce = ce_loss_fn(logits, labels)
+
+            contrast_weight_value = contrastive_weight.get() if scheduled_contrst_wght else contrastive_weight
+            loss = contrast_weight_value * loss_contrast + (1 - contrast_weight_value) * loss_ce
+
+            # ── AE branch (frozen): reco scores for DisCo only, not added to loss ──
+            ae_reco_per_event = None
+            if ae_model is not None and obj is not None:
+                with torch.no_grad():
+                    recon, _ = ae_model(obj)
+                    ae_reco_per_event = mse_no_reduce(recon, obj).mean(dim=1)  # [B]
+
+        # ── DisCo + closure ──
+        disco_weight_value   = disco_weight.get()   if scheduled_disco_wght   else disco_weight
+        closure_weight_value = closure_weight.get() if scheduled_closure_wght else closure_weight
+
+        loss_disco   = torch.tensor(0.0, device=device)
+        loss_closure = torch.tensor(0.0, device=device)
+        if ae_model is not None and ae_reco_per_event is not None and (disco_weight_value > 0.0 or closure_weight_value > 0.0):
+            qcd_mask = (labels == qcd_label)
+            if qcd_mask.sum() > 10:
+                proxy_md = _proxy_md(embeddings if use_l2_proxy_md else latent, labels, qcd_label, pca_mean, pca_comps, pca_stds)
+                nw = torch.ones(qcd_mask.sum(), device=device)
+
+                if disco_weight_value > 0.0:
+                    loss_disco = distance_corr(
+                        ae_reco_per_event[qcd_mask].float(),
+                        proxy_md[qcd_mask].float(),
+                        nw,
+                    )
+                    loss = loss + disco_weight_value * loss_disco
+
+                if closure_weight_value > 0.0:
+                    loss_closure = closure_loss_batch(
+                        ae_reco_per_event[qcd_mask].float(),
+                        proxy_md[qcd_mask].float(),
+                        nw,
+                    )
+                    loss = loss + closure_weight_value * loss_closure
+
+        # only contrastive params — AE is frozen
+        all_params = (
+            list(encoder.parameters()) +
+            list(projector.parameters()) +
+            list(classifier.parameters())
+        )
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+            optimizer.step()
+
+        if scheduler is not None:
+            scheduler.step()
+        if scheduled_contrst_wght:
+            contrastive_weight.step()
+        if scheduled_disco_wght:
+            disco_weight.step()
+        if scheduled_closure_wght:
+            closure_weight.step()
+
+        bs = x.size(0)
+        total_loss     += loss.item() * bs
+        total_contrast += loss_contrast.item() * bs
+        total_ce       += loss_ce.item() * bs
+        total_disco    += loss_disco.item() * bs
+        total_closure  += loss_closure.item() * bs
+        count          += bs
+        class_metrics.update(logits, labels)
+
+    return {
+        "loss":     total_loss     / count,
+        "contrast": total_contrast / count,
+        "ce":       total_ce       / count,
+        "disco":    total_disco    / count,
+        "closure":  total_closure  / count,
+        **class_metrics.compute_metrics(),
+    }
+
 
 @torch.no_grad()
 def validate_epoch(

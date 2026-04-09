@@ -1,4 +1,4 @@
-model_name: embedding_hlt_linformer_supcon
+model_name: embedding_hlt_linformer_single_disco_ce
 
 data:
   val_split: 0.1
@@ -7,7 +7,7 @@ data:
 
 hyperparameters:
   num_epochs: 100
-  early_stopping_patience: 15
+  early_stopping_patience: 30
   contrast_loss: SupConLoss
   lr: 0.0001
   lr_min: 0.0
@@ -21,16 +21,18 @@ hyperparameters:
   proj_dim: 6
   linear_dim: 16
   contrast_temp: 0.05
-  contrastive_weight: 1.0
+  contrastive_weight: 0.05
+  contrastive_max: 0.10
   contrastive_warmup: 0.05
   mixed_prec: true
-  # double DisCo: no closure loss
+  use_l2_proxy_md: false
   disco_weight: 1.0
   closure_weight: 1.0
-  disco_warmup: 0.2
-  closure_warmup: 0.2
+  disco_warmup: 0.4
+  closure_warmup: 0.4
   pca_components: 2
-  ae_reco_weight: 1.0
   ae_latent: 16
   ae_enc_nodes: [512, 256]
   ae_dec_nodes: [256, 512]
+  ae_lr: 0.001
+  ae_pretrain_epochs: 20

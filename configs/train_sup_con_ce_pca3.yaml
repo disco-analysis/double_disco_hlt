@@ -1,4 +1,4 @@
-model_name: embedding_hlt_linformer_supcon
+model_name: embedding_hlt_linformer_supcon_ce_pca3
 
 data:
   val_split: 0.1
@@ -12,7 +12,7 @@ hyperparameters:
   lr: 0.0001
   lr_min: 0.0
   lr_warmup: 0.05
-  batch_size: 4096
+  batch_size: 2048
   num_heads: 8
   num_layers: 4
   embed_size: 128
@@ -21,15 +21,15 @@ hyperparameters:
   proj_dim: 6
   linear_dim: 16
   contrast_temp: 0.05
-  contrastive_weight: 1.0
+  contrastive_weight: 0.05
+  contrastive_max: 0.10
   contrastive_warmup: 0.05
   mixed_prec: true
-  # double DisCo: no closure loss
   disco_weight: 1.0
   closure_weight: 1.0
   disco_warmup: 0.2
   closure_warmup: 0.2
-  pca_components: 2
+  pca_components: 3
   ae_reco_weight: 1.0
   ae_latent: 16
   ae_enc_nodes: [512, 256]

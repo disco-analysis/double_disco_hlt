@@ -9,10 +9,10 @@ import wandb
 import numpy as np
 from embedding.models import TransformerEncoder, Projector
 from embedding.autoencoder import Autoencoder
-from embedding.training import make_train_val_split, build_train_val_loaders, train_epoch, validate_epoch, EarlyStopping, cosine_schedule_with_warmup, cosine_constrastive_schedule, linear_warmup_weight
+from embedding.training import make_train_val_split, build_train_val_loaders, train_epoch, validate_epoch, EarlyStopping, cosine_schedule_with_warmup, cosine_constrastive_schedule, linear_warmup_weight, fit_qcd_pca
 from embedding.utils.data_utils import compute_normalization_constants
 from embedding.utils.cfg_handler import train_config, data_config
-from embedding.utils.data_utils import compute_class_weights, load_data
+from embedding.utils.data_utils import compute_class_weights
 
 # Use GPU if available, otherwise fall back to CPU
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -70,6 +70,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
     latent_dim = cfg.hp("latent_dim", 6)             # encoder output (event-level) dimension
     proj_dim = cfg.hp("proj_dim", 12)                # projector output dimension for contrastive loss
     linear_dim = cfg.hp("linear_dim", None)          # if set, switches encoder to Linformer
+    dim_feedforward = cfg.hp("dim_feedforward", 2048) # FFN hidden size inside each transformer block
     contrast_temp = cfg.hp("contrast_temp", 0.07)   # InfoNCE temperature
     contrastive_weight = cfg.hp("contrastive_weight", 0.05) # Min (or fixed) weight on contrastive loss
     contrastive_max = cfg.hp("contrastive_max", None) # if set, ramp contrastive weight up to this value
@@ -90,47 +91,65 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
         logger.info("Test mode enabled: using only 10% of the data for training and validation.")
         logger.info(f"Number of events: {num_events} (10% of total)")
 
-    # Load data onto CPU — the DataLoader will move batches to GPU on the fly
-    feature_block, label_block = load_data(
-        data_path,
-        map_location="cpu", # load on CPU and move to GPU in DataLoader to avoid GPU memory issues
-        max_events=num_events if test_mode else -1,
-    )
+    # ── AE branch config (needed before data loading to decide what to extract) ──
+    use_l2_proxy_md = cfg.hp("use_l2_proxy_md", False)
+    disco_weight    = cfg.hp("disco_weight",    0.0)
+    closure_weight  = cfg.hp("closure_weight",  0.0)
+    ae_reco_weight  = cfg.hp("ae_reco_weight",  1.0)
+    disco_warmup    = cfg.hp("disco_warmup",    0.0)
+    closure_warmup  = cfg.hp("closure_warmup",  0.0)
+    pca_n           = cfg.hp("pca_components",  None)  # if set, fit PCA on training QCD before MD
+    need_ae = disco_weight > 0.0 or closure_weight > 0.0
+
+    # Load the file once and extract both PF candidates and obj-level features
+    # in a single torch.load to avoid doubling peak RAM.
+    _raw = torch.load(data_path, map_location="cpu")
+    _n = num_events if test_mode else -1
+    if isinstance(_raw, dict):
+        feature_block = _raw['pf'][:_n] if _n > 0 else _raw['pf']
+        label_block   = (_raw['label'][:_n] if _n > 0 else _raw['label']).long()
+        feature_block = torch.nan_to_num(feature_block, nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        from embedding.utils.data_utils import clean_data
+        data = _raw[:_n] if _n > 0 else _raw
+        feature_block, label_block = clean_data(data)
+    # Grab obj features now, before freeing _raw
+    _obj_raw = _raw["obj"][:_n] if (need_ae and isinstance(_raw, dict) and "obj" in _raw and _n > 0) else (_raw["obj"] if (need_ae and isinstance(_raw, dict) and "obj" in _raw) else None)
+    del _raw  # free the full file — PF data is already in feature_block
+
     # Split by index so we can apply the same split to the obj-level features below
     X_tr, y_tr, X_val, y_val, idx_tr, idx_val = make_train_val_split(feature_block, label_block, val_size=val_split)
     assert X_tr.device.type == "cpu"
     assert y_tr.device.type == "cpu"
+    # Derive scalars needed later before freeing the large tensors
+    num_tokens_pf = feature_block.size(1)  # sequence length for Linformer
+    num_classes = int(label_block.max().item()) + 1
+    class_weights = compute_class_weights(label_block, setting=class_weights_setting)
+    del feature_block, label_block
 
     # ── AE branch (axis 1 of double DisCo) ────────────────────────────────────
-    # The AE operates on object-level features (pt, η, φ, type_id for each PF candidate,
-    # all concatenated into a flat vector). It is only built and trained when disco_weight > 0.
-    # When disco_weight == 0, this whole block is skipped and ae_model stays None.
-    disco_weight    = cfg.hp("disco_weight",    0.0)  # weight on the DisCo decorrelation term
-    closure_weight  = cfg.hp("closure_weight",  0.0)  # weight on the ABCD closure loss
-    ae_reco_weight  = cfg.hp("ae_reco_weight",  1.0)  # weight on the AE reconstruction loss
-    disco_warmup    = cfg.hp("disco_warmup",    0.0)  # fraction of total steps to ramp disco from 0
-    closure_warmup  = cfg.hp("closure_warmup",  0.0)  # fraction of total steps to ramp closure from 0
     obj_tr = obj_val = None
     ae_model = None
-    if disco_weight > 0.0 or closure_weight > 0.0:
-        raw = torch.load(data_path, map_location="cpu")
-        obj_all = raw["obj"][:num_events if test_mode else raw["obj"].shape[0]]
+    if need_ae:
         # Take 4 features per PF candidate and flatten: shape (N, n_cands*4)
         # Same preprocessing as train_ae_axis1.py to keep inference consistent
-        obj_flat = obj_all[:, :, :4].reshape(obj_all.shape[0], -1).float().numpy()
+        obj_flat = _obj_raw[:, :, :4].reshape(_obj_raw.shape[0], -1).float().numpy()
+        del _obj_raw
         # Z-score normalise using training-set statistics
         mu  = obj_flat.mean(axis=0).astype(np.float32)
         std = obj_flat.std(axis=0).astype(np.float32)
         std = np.where(std < 1e-8, 1.0, std)        # avoid division by zero for constant features
         obj_norm = torch.from_numpy((obj_flat - mu) / (std + 1e-8))
+        del obj_flat
+        logger.info(f"Loaded object-level features for AE: shape {obj_norm.shape}")
         # Apply the same train/val split as the PF candidate data
         obj_tr  = obj_norm[idx_tr]
         obj_val = obj_norm[idx_val]
+        del obj_norm
         # Save scaler so eval_abcd.py can apply the exact same normalisation at inference
         obj_scaler = {"mu": torch.from_numpy(mu), "std": torch.from_numpy(std)}
-        logger.info(f"Loaded object-level features for AE: shape {obj_norm.shape}")
 
-        ae_feat = obj_norm.shape[1]
+        ae_feat = obj_tr.shape[1]
         ae_latent  = cfg.hp("ae_latent",  16)
         ae_enc     = cfg.hp("ae_enc_nodes", [512, 256])
         ae_dec     = cfg.hp("ae_dec_nodes", [256, 512])
@@ -145,7 +164,6 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
 
     # ── Class balance logging ──────────────────────────────────────────────────
     # Useful for spotting severe imbalance that might need class weighting
-    num_classes = int(label_block.max().item()) + 1
     class_count_tr = torch.bincount(y_tr, minlength=num_classes)
     logger.info("Class counts in training set:")
     for i in range(num_classes):
@@ -176,8 +194,9 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
         latent_dim=latent_dim,
         num_heads=num_heads,
         num_layers=num_layers,
+        dim_feedforward=dim_feedforward,
         linear_dim=linear_dim,
-        num_tokens=feature_block.size(1) if linear_dim is not None else None,
+        num_tokens=num_tokens_pf if linear_dim is not None else None,
         pairwise=pairwise,
         pre_processor=preproc
     ).to(device).train()
@@ -189,8 +208,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
 
     # ── Loss functions ─────────────────────────────────────────────────────────
     # Class weights down-weight over-represented classes so the CE loss doesn't dominate on majority
-    class_weights = compute_class_weights(label_block, setting=class_weights_setting).to(device)
-    ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+    ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights.to(device))
     # Contrastive loss (InfoNCE by default): pulls same-class embeddings together, pushes different apart
     contrast_loss_class = getattr(importlib.import_module("embedding.loss"), contrast_loss)
     criterion = contrast_loss_class(temperature=contrast_temp)
@@ -254,7 +272,19 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
     model_path = os.path.join(os.getcwd(), "checkpoints", f"{cfg.get_model_name()}_encoder_{timestamp}.pth")
 
     logger.info(f"Starting training for {num_epochs} epochs.")
+    use_pca = (pca_n is not None) and need_ae and (disco_weight > 0.0 or closure_weight > 0.0)
+    pca_mean = pca_comps = pca_stds = None  # populated each epoch when use_pca is True
+
     for epoch in range(num_epochs):
+        # Refit PCA on training QCD embeddings so it tracks the evolving encoder
+        if use_pca:
+            pca_mean, pca_comps, pca_stds, explained = fit_qcd_pca(
+                encoder, projector, train_loader, norm_constants, pairwise, device,
+                n_components=pca_n, use_l2_proxy_md=use_l2_proxy_md,
+            )
+            logger.info(f"Epoch {epoch+1}: PCA fitted on training QCD "
+                        f"({pca_n} components, {100*explained:.1f}% variance explained)")
+
         # Forward + backward pass over all training batches; updates model weights
         tr = train_epoch(
             encoder,
@@ -276,6 +306,10 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
             ae_reco_weight=ae_reco_weight,
             disco_weight=disco_schedule,
             closure_weight=closure_schedule,
+            use_l2_proxy_md=use_l2_proxy_md,
+            pca_mean=pca_mean,
+            pca_comps=pca_comps,
+            pca_stds=pca_stds,
         )
         # Evaluation pass — no gradients, no weight updates
         va = validate_epoch(
@@ -319,6 +353,11 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
                 ckpt["ae"] = ae_model.state_dict()
                 # Save the normalisation scaler so eval_abcd.py applies the same transform
                 ckpt["ae_scaler"] = obj_scaler
+            if use_pca and pca_mean is not None:
+                ckpt["pca_mean"]        = pca_mean.cpu()
+                ckpt["pca_components"]  = pca_comps.cpu()
+                ckpt["pca_stds"]        = pca_stds.cpu()
+                ckpt["pca_n_components"] = pca_n
             torch.save(ckpt, model_path)
             logger.info(f"Saved best checkpoint to: {model_path}")
 

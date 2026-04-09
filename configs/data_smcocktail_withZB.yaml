@@ -1,0 +1,33 @@
+ds_name: hlt_smcocktail
+
+data_processing:
+  redir: ""
+  sample_dir: "/afs/cern.ch/user/e/escheull"
+  out_path:   "/eos/user/e/escheull/smcocktail_1M_withZB"
+
+  # --- PF candidates view (contrastive training input) ---
+  pfcands: true
+  n_objects: 400
+  sort_by_pt: true
+  sk_spacing: null
+
+  # --- AE object view (AE input) ---
+  also_save_objects: true
+
+  # --- dataset sizing ---
+  nevents_per_class: 250000
+
+  # --- outputs ---
+  split: 0.8
+  store_by_class: false
+
+  samples:
+    - DY:
+      - first_DY.txt
+    - QCD+ZB:
+      - first_QCD.txt
+      - first_ZB.txt
+    - TT:
+      - first_TT.txt
+    - WJet:
+      - first_WJet.txt
