@@ -300,23 +300,31 @@ def ABCD(config):
     embeddings_masked = embeddings_all[mask]
     print(f"Events after masking: {mask.sum()}", flush=True)
 
-    # ── PCA-MD axis: fit fresh PCA (with whitening) on test QCD embeddings ──
-    # whiten=True scales each PC by 1/sqrt(eigenvalue) so the QCD covariance ≈ identity.
-    # MD in the whitened space = squared Euclidean distance (no precision matrix needed).
-    n_pca = config.get("n_pca") or (int(ckpt["pca_n_components"]) if "pca_n_components" in ckpt else 2)
-    _pca_eval = PCA(n_components=min(n_pca, embeddings_masked.shape[1]), whiten=True)
-    _pca_eval.fit(embeddings_masked[labels[mask] == 1])
-    emb_pca = _pca_eval.transform(embeddings_masked)
-    pca_mean_np  = _pca_eval.mean_
-    pca_comps_np = _pca_eval.components_
-    pca_stds_np  = np.sqrt(_pca_eval.explained_variance_)
-    print(f"  PCA fit on test QCD ({(labels[mask] == 1).sum()} events, {n_pca} components, whitened), "
-          f"variance explained: {_pca_eval.explained_variance_ratio_.sum()*100:.1f}%", flush=True)
+    # ── Axis 2 score: PCA-MD (default) or raw MD (--raw_md_axis2) ──
+    if not config.get("raw_md_axis2"):
+        # whiten=True scales each PC by 1/sqrt(eigenvalue) so the QCD covariance ≈ identity.
+        # MD in the whitened space = squared Euclidean distance (no precision matrix needed).
+        n_pca = config.get("n_pca") or (int(ckpt["pca_n_components"]) if "pca_n_components" in ckpt else 2)
+        _pca_eval = PCA(n_components=min(n_pca, embeddings_masked.shape[1]), whiten=True)
+        _pca_eval.fit(embeddings_masked[labels[mask] == 1])
+        emb_pca = _pca_eval.transform(embeddings_masked)
+        pca_mean_np  = _pca_eval.mean_
+        pca_comps_np = _pca_eval.components_
+        pca_stds_np  = np.sqrt(_pca_eval.explained_variance_)
+        print(f"  PCA fit on test QCD ({(labels[mask] == 1).sum()} events, {n_pca} components, whitened), "
+              f"variance explained: {_pca_eval.explained_variance_ratio_.sum()*100:.1f}%", flush=True)
 
-    # MD in whitened space = squared Euclidean distance from QCD mean
-    _mu_pca   = emb_pca[labels[mask] == 1].mean(axis=0)
-    axis2_pca = np.sum((emb_pca - _mu_pca) ** 2, axis=1).astype(np.float32)
-    print(f"  PCA-MD (whitened) computed (dim={emb_pca.shape[1]})", flush=True)
+        # MD in whitened space = squared Euclidean distance from QCD mean
+        _mu_pca   = emb_pca[labels[mask] == 1].mean(axis=0)
+        axis2_pca = np.sum((emb_pca - _mu_pca) ** 2, axis=1).astype(np.float32)
+        print(f"  PCA-MD (whitened) computed (dim={emb_pca.shape[1]})", flush=True)
+    else:
+        # Use raw Mahalanobis distance as axis 2 (no PCA applied)
+        n_pca = 0
+        emb_pca = None
+        pca_mean_np = pca_comps_np = pca_stds_np = None
+        axis2_pca = axis2_bkg
+        print("  Using raw MD as axis 2 (no PCA)", flush=True)
 
     # ── QCD-only arrays for ABCD scan and closure ──
     # DisCo was trained to decorrelate only on QCD, so closure is most meaningful on QCD.
@@ -341,8 +349,12 @@ def ABCD(config):
         sig_axis1 = sig_ae[sig_mask]
         sig_axis2 = sig_con[sig_mask]
         sig_embeddings_masked = sig_embeddings[sig_mask]
-        sig_emb_pca = (sig_embeddings_masked - pca_mean_np) @ pca_comps_np.T / pca_stds_np
-        sig_axis2_pca = np.sum((sig_emb_pca - _mu_pca) ** 2, axis=1).astype(np.float32)
+        if not config.get("raw_md_axis2"):
+            sig_emb_pca = (sig_embeddings_masked - pca_mean_np) @ pca_comps_np.T / pca_stds_np
+            sig_axis2_pca = np.sum((sig_emb_pca - _mu_pca) ** 2, axis=1).astype(np.float32)
+        else:
+            sig_emb_pca = None
+            sig_axis2_pca = sig_axis2
         print(f"Signal events after masking: {sig_mask.sum()}", flush=True)
 
     # ── ABCD scan ──
@@ -467,182 +479,183 @@ def ABCD(config):
         plt.close()
         wandb.log({f"Hists2D/{name}": wandb.Image(out_cls)})
 
-    # ── AE vs PCA-MD: scatter + KDE contour ──
-    fig, ax = plt.subplots(figsize=fig_size)
-    for cls, name in class_names.items():
-        m = labels_masked == cls
-        if m.sum() == 0:
-            continue
-        ax.scatter(axis1_bkg[m], axis2_pca[m],
-                   s=0.3, alpha=0.15, color=class_colors[cls], label=name, rasterized=True)
-    if sig_axis1 is not None and sig_axis2_pca is not None:
-        ax.scatter(sig_axis1, sig_axis2_pca, s=0.5, alpha=0.4,
-                   color="tab:purple", label="TpTp", rasterized=True)
-    ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
-    ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("AE reco loss", fontsize=fs)
-    ax.set_ylabel("Contrastive score (PCA-MD)", fontsize=fs)
-    ax.set_title("AE vs PCA-MD — all classes (scatter)")
-    ax.legend(markerscale=10, fontsize=fs_legend)
-    plt.tick_params(axis="x", labelsize=fs_leg)
-    plt.tick_params(axis="y", labelsize=fs_leg)
-    out_pca_md_scatter = os.path.join(plot_dir, "hist2d_pca_md_scatter.png")
-    fig.savefig(out_pca_md_scatter, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    wandb.log({"Hists2D/pca_md_scatter": wandb.Image(out_pca_md_scatter)})
+    # ── AE vs PCA-MD: scatter + KDE contour (skipped when --raw_md_axis2) ──
+    if not config.get("raw_md_axis2"):
+        fig, ax = plt.subplots(figsize=fig_size)
+        for cls, name in class_names.items():
+            m = labels_masked == cls
+            if m.sum() == 0:
+                continue
+            ax.scatter(axis1_bkg[m], axis2_pca[m],
+                       s=0.3, alpha=0.15, color=class_colors[cls], label=name, rasterized=True)
+        if sig_axis1 is not None and sig_axis2_pca is not None:
+            ax.scatter(sig_axis1, sig_axis2_pca, s=0.5, alpha=0.4,
+                       color="tab:purple", label="TpTp", rasterized=True)
+        ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+        ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel("AE reco loss", fontsize=fs)
+        ax.set_ylabel("Contrastive score (PCA-MD)", fontsize=fs)
+        ax.set_title("AE vs PCA-MD — all classes (scatter)")
+        ax.legend(markerscale=10, fontsize=fs_legend)
+        plt.tick_params(axis="x", labelsize=fs_leg)
+        plt.tick_params(axis="y", labelsize=fs_leg)
+        out_pca_md_scatter = os.path.join(plot_dir, "hist2d_pca_md_scatter.png")
+        fig.savefig(out_pca_md_scatter, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        wandb.log({"Hists2D/pca_md_scatter": wandb.Image(out_pca_md_scatter)})
 
-    # KDE contours in log(AE) vs log(PCA-MD) space
-    rng_pca = np.random.default_rng(42)
-    fig, ax = plt.subplots(figsize=fig_size)
-    kde_legend_handles = []
-    all_classes_for_kde = list(class_names.items())
-    if sig_axis1 is not None and sig_axis2_pca is not None:
-        all_classes_for_kde.append((-1, "TpTp"))
+        # KDE contours in log(AE) vs log(PCA-MD) space
+        rng_pca = np.random.default_rng(42)
+        fig, ax = plt.subplots(figsize=fig_size)
+        kde_legend_handles = []
+        all_classes_for_kde = list(class_names.items())
+        if sig_axis1 is not None and sig_axis2_pca is not None:
+            all_classes_for_kde.append((-1, "TpTp"))
 
-    # compute global log-space range across all classes so contours aren't clipped
-    all_lx, all_ly = [], []
-    for cls, name in all_classes_for_kde:
-        x_raw = sig_axis1 if cls == -1 else axis1_bkg[labels_masked == cls]
-        y_raw = sig_axis2_pca if cls == -1 else axis2_pca[labels_masked == cls]
-        valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
-        if valid.sum() >= 50:
-            all_lx.append(np.log10(x_raw[valid]))
-            all_ly.append(np.log10(y_raw[valid]))
-    glx_min, glx_max = np.concatenate(all_lx).min(), np.concatenate(all_lx).max()
-    gly_min, gly_max = np.concatenate(all_ly).min(), np.concatenate(all_ly).max()
-    xi_global, yi_global = np.mgrid[glx_min:glx_max:200j, gly_min:gly_max:200j]
+        # compute global log-space range across all classes so contours aren't clipped
+        all_lx, all_ly = [], []
+        for cls, name in all_classes_for_kde:
+            x_raw = sig_axis1 if cls == -1 else axis1_bkg[labels_masked == cls]
+            y_raw = sig_axis2_pca if cls == -1 else axis2_pca[labels_masked == cls]
+            valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
+            if valid.sum() >= 50:
+                all_lx.append(np.log10(x_raw[valid]))
+                all_ly.append(np.log10(y_raw[valid]))
+        glx_min, glx_max = np.concatenate(all_lx).min(), np.concatenate(all_lx).max()
+        gly_min, gly_max = np.concatenate(all_ly).min(), np.concatenate(all_ly).max()
+        xi_global, yi_global = np.mgrid[glx_min:glx_max:200j, gly_min:gly_max:200j]
 
-    for cls, name in all_classes_for_kde:
-        if cls == -1:
-            x_raw, y_raw = sig_axis1, sig_axis2_pca
-            color = "tab:purple"
-        else:
+        for cls, name in all_classes_for_kde:
+            if cls == -1:
+                x_raw, y_raw = sig_axis1, sig_axis2_pca
+                color = "tab:purple"
+            else:
+                m = labels_masked == cls
+                if m.sum() < 50:
+                    continue
+                x_raw, y_raw = axis1_bkg[m], axis2_pca[m]
+                color = class_colors[cls]
+
+            valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
+            lx = np.log10(x_raw[valid])
+            ly = np.log10(y_raw[valid])
+            if lx.shape[0] > 20_000:
+                idx = rng_pca.choice(lx.shape[0], 20_000, replace=False)
+                lx, ly = lx[idx], ly[idx]
+            kde = gaussian_kde(np.vstack([lx, ly]))
+            zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
+            ax.contour(10**xi_global, 10**yi_global, zi.reshape(xi_global.shape),
+                       colors=color, alpha=0.7, linewidths=1.5)
+            kde_legend_handles.append(
+                Line2D([0], [0], color=color, linewidth=1.5, label=name)
+            )
+
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel("AE reco loss", fontsize=fs)
+        ax.set_ylabel("Contrastive score (PCA-MD)", fontsize=fs)
+        ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+        ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
+        ax.set_title("AE vs PCA-MD — KDE contours")
+        ax.legend(handles=kde_legend_handles, fontsize=fs_legend)
+        plt.tick_params(axis="x", labelsize=fs_leg)
+        plt.tick_params(axis="y", labelsize=fs_leg)
+        ax.grid(alpha=0.3)
+        out_pca_md_kde = os.path.join(plot_dir, "hist2d_pca_md_kde.png")
+        fig.savefig(out_pca_md_kde, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        wandb.log({"Hists2D/pca_md_kde": wandb.Image(out_pca_md_kde)})
+
+    # ── PCA scatter + KDE contour of encoder embeddings (skipped with --skip_embedding_pca) ──
+    if not config.get("skip_embedding_pca"):
+        pca = PCA(n_components=2)
+        pca.fit(embeddings_masked[labels_masked == 1])
+        emb_2d = pca.transform(embeddings_masked)
+
+        sig_emb_2d = None
+        if sig_embeddings_masked is not None:
+            sig_emb_2d = pca.transform(sig_embeddings_masked)
+
+        # PCA scatter
+        fig, ax = plt.subplots(figsize=fig_size)
+        for cls, name in class_names.items():
+            m = labels_masked == cls
+            if m.sum() == 0:
+                continue
+            ax.scatter(emb_2d[m, 0], emb_2d[m, 1],
+                       s=0.5, alpha=0.12, color=class_colors[cls],
+                       label=name, rasterized=True)
+        if sig_emb_2d is not None:
+            ax.scatter(sig_emb_2d[:, 0], sig_emb_2d[:, 1],
+                       s=0.5, alpha=0.4, color="tab:purple",
+                       label="TpTp", rasterized=True)
+        ax.set_xlabel("PCA Component 1", fontsize=fs)
+        ax.set_ylabel("PCA Component 2", fontsize=fs)
+        ax.set_title("Encoder embeddings — PCA (fit on QCD)")
+        ax.legend(markerscale=10, fontsize=fs_legend)
+        plt.tick_params(axis="x", labelsize=fs_leg)
+        plt.tick_params(axis="y", labelsize=fs_leg)
+        out_pca_scatter = os.path.join(plot_dir, "pca_scatter_embeddings.png")
+        fig.savefig(out_pca_scatter, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        wandb.log({"PCA/scatter": wandb.Image(out_pca_scatter)})
+
+        # KDE contour in PCA space
+        rng = np.random.default_rng(42)
+        fig, ax = plt.subplots(figsize=fig_size)
+        legend_handles = []
+
+        # global range across all classes so contours aren't clipped
+        all_emb_x = [emb_2d[labels_masked == cls, 0] for cls in class_names if (labels_masked == cls).sum() >= 50]
+        all_emb_y = [emb_2d[labels_masked == cls, 1] for cls in class_names if (labels_masked == cls).sum() >= 50]
+        if sig_emb_2d is not None:
+            all_emb_x.append(sig_emb_2d[:, 0])
+            all_emb_y.append(sig_emb_2d[:, 1])
+        gx_min, gx_max = np.concatenate(all_emb_x).min(), np.concatenate(all_emb_x).max()
+        gy_min, gy_max = np.concatenate(all_emb_y).min(), np.concatenate(all_emb_y).max()
+        xi_g, yi_g = np.mgrid[gx_min:gx_max:200j, gy_min:gy_max:200j]
+
+        for cls, name in class_names.items():
             m = labels_masked == cls
             if m.sum() < 50:
                 continue
-            x_raw, y_raw = axis1_bkg[m], axis2_pca[m]
-            color = class_colors[cls]
-
-        valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
-        lx = np.log10(x_raw[valid])
-        ly = np.log10(y_raw[valid])
-        if lx.shape[0] > 20_000:
-            idx = rng_pca.choice(lx.shape[0], 20_000, replace=False)
-            lx, ly = lx[idx], ly[idx]
-        kde = gaussian_kde(np.vstack([lx, ly]))
-        zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
-        ax.contour(10**xi_global, 10**yi_global, zi.reshape(xi_global.shape),
-                   colors=color, alpha=0.7, linewidths=1.5)
-        kde_legend_handles.append(
-            Line2D([0], [0], color=color, linewidth=1.5, label=name)
-        )
-
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("AE reco loss", fontsize=fs)
-    ax.set_ylabel("Contrastive score (PCA-MD)", fontsize=fs)
-    ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
-    ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
-    ax.set_title("AE vs PCA-MD — KDE contours")
-    ax.legend(handles=kde_legend_handles, fontsize=fs_legend)
-    plt.tick_params(axis="x", labelsize=fs_leg)
-    plt.tick_params(axis="y", labelsize=fs_leg)
-    ax.grid(alpha=0.3)
-    out_pca_md_kde = os.path.join(plot_dir, "hist2d_pca_md_kde.png")
-    fig.savefig(out_pca_md_kde, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    wandb.log({"Hists2D/pca_md_kde": wandb.Image(out_pca_md_kde)})
-
-    # ── PCA scatter + KDE contour of encoder embeddings ──
-    # Fit PCA on QCD (label==1) embeddings only
-    pca = PCA(n_components=2)
-    pca.fit(embeddings_masked[labels_masked == 1])
-    emb_2d = pca.transform(embeddings_masked)
-
-    sig_emb_2d = None
-    if sig_embeddings_masked is not None:
-        sig_emb_2d = pca.transform(sig_embeddings_masked)
-
-    # PCA scatter
-    fig, ax = plt.subplots(figsize=fig_size)
-    for cls, name in class_names.items():
-        m = labels_masked == cls
-        if m.sum() == 0:
-            continue
-        ax.scatter(emb_2d[m, 0], emb_2d[m, 1],
-                   s=0.5, alpha=0.12, color=class_colors[cls],
-                   label=name, rasterized=True)
-    if sig_emb_2d is not None:
-        ax.scatter(sig_emb_2d[:, 0], sig_emb_2d[:, 1],
-                   s=0.5, alpha=0.4, color="tab:purple",
-                   label="TpTp", rasterized=True)
-    ax.set_xlabel("PCA Component 1", fontsize=fs)
-    ax.set_ylabel("PCA Component 2", fontsize=fs)
-    ax.set_title("Encoder embeddings — PCA (fit on QCD)")
-    ax.legend(markerscale=10, fontsize=fs_legend)
-    plt.tick_params(axis="x", labelsize=fs_leg)
-    plt.tick_params(axis="y", labelsize=fs_leg)
-    out_pca_scatter = os.path.join(plot_dir, "pca_scatter_embeddings.png")
-    fig.savefig(out_pca_scatter, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    wandb.log({"PCA/scatter": wandb.Image(out_pca_scatter)})
-
-    # KDE contour in PCA space
-    rng = np.random.default_rng(42)
-    fig, ax = plt.subplots(figsize=fig_size)
-    legend_handles = []
-
-    # global range across all classes so contours aren't clipped
-    all_emb_x = [emb_2d[labels_masked == cls, 0] for cls in class_names if (labels_masked == cls).sum() >= 50]
-    all_emb_y = [emb_2d[labels_masked == cls, 1] for cls in class_names if (labels_masked == cls).sum() >= 50]
-    if sig_emb_2d is not None:
-        all_emb_x.append(sig_emb_2d[:, 0])
-        all_emb_y.append(sig_emb_2d[:, 1])
-    gx_min, gx_max = np.concatenate(all_emb_x).min(), np.concatenate(all_emb_x).max()
-    gy_min, gy_max = np.concatenate(all_emb_y).min(), np.concatenate(all_emb_y).max()
-    xi_g, yi_g = np.mgrid[gx_min:gx_max:200j, gy_min:gy_max:200j]
-
-    for cls, name in class_names.items():
-        m = labels_masked == cls
-        if m.sum() < 50:
-            continue
-        x, y = emb_2d[m, 0], emb_2d[m, 1]
-        if x.shape[0] > 20_000:
-            idx = rng.choice(x.shape[0], 20_000, replace=False)
-            x, y = x[idx], y[idx]
-        kde = gaussian_kde(np.vstack([x, y]))
-        zi = kde(np.vstack([xi_g.flatten(), yi_g.flatten()]))
-        ax.contour(xi_g, yi_g, zi.reshape(xi_g.shape),
-                   colors=class_colors[cls], alpha=0.7, linewidths=1.5)
-        legend_handles.append(
-            Line2D([0], [0], color=class_colors[cls], linewidth=1.5, label=name)
-        )
-    if sig_emb_2d is not None:
-        xs, ys = sig_emb_2d[:, 0], sig_emb_2d[:, 1]
-        if xs.shape[0] > 20_000:
-            idx = rng.choice(xs.shape[0], 20_000, replace=False)
-            xs, ys = xs[idx], ys[idx]
-        kde_s = gaussian_kde(np.vstack([xs, ys]))
-        zi_s = kde_s(np.vstack([xi_g.flatten(), yi_g.flatten()]))
-        ax.contour(xi_g, yi_g, zi_s.reshape(xi_g.shape),
-                   colors="tab:purple", alpha=0.7, linewidths=1.5)
-        legend_handles.append(
-            Line2D([0], [0], color="tab:purple", linewidth=1.5, label="TpTp")
-        )
-    ax.set_xlabel("PCA Component 1", fontsize=fs)
-    ax.set_ylabel("PCA Component 2", fontsize=fs)
-    ax.set_title("KDE contours — encoder embeddings PCA (fit on QCD)")
-    ax.legend(handles=legend_handles, fontsize=fs_legend)
-    plt.tick_params(axis="x", labelsize=fs_leg)
-    plt.tick_params(axis="y", labelsize=fs_leg)
-    ax.grid(alpha=0.3)
-    out_pca_kde = os.path.join(plot_dir, "pca_kde_embeddings.png")
-    fig.savefig(out_pca_kde, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    wandb.log({"PCA/kde_contour": wandb.Image(out_pca_kde)})
+            x, y = emb_2d[m, 0], emb_2d[m, 1]
+            if x.shape[0] > 20_000:
+                idx = rng.choice(x.shape[0], 20_000, replace=False)
+                x, y = x[idx], y[idx]
+            kde = gaussian_kde(np.vstack([x, y]))
+            zi = kde(np.vstack([xi_g.flatten(), yi_g.flatten()]))
+            ax.contour(xi_g, yi_g, zi.reshape(xi_g.shape),
+                       colors=class_colors[cls], alpha=0.7, linewidths=1.5)
+            legend_handles.append(
+                Line2D([0], [0], color=class_colors[cls], linewidth=1.5, label=name)
+            )
+        if sig_emb_2d is not None:
+            xs, ys = sig_emb_2d[:, 0], sig_emb_2d[:, 1]
+            if xs.shape[0] > 20_000:
+                idx = rng.choice(xs.shape[0], 20_000, replace=False)
+                xs, ys = xs[idx], ys[idx]
+            kde_s = gaussian_kde(np.vstack([xs, ys]))
+            zi_s = kde_s(np.vstack([xi_g.flatten(), yi_g.flatten()]))
+            ax.contour(xi_g, yi_g, zi_s.reshape(xi_g.shape),
+                       colors="tab:purple", alpha=0.7, linewidths=1.5)
+            legend_handles.append(
+                Line2D([0], [0], color="tab:purple", linewidth=1.5, label="TpTp")
+            )
+        ax.set_xlabel("PCA Component 1", fontsize=fs)
+        ax.set_ylabel("PCA Component 2", fontsize=fs)
+        ax.set_title("KDE contours — encoder embeddings PCA (fit on QCD)")
+        ax.legend(handles=legend_handles, fontsize=fs_legend)
+        plt.tick_params(axis="x", labelsize=fs_leg)
+        plt.tick_params(axis="y", labelsize=fs_leg)
+        ax.grid(alpha=0.3)
+        out_pca_kde = os.path.join(plot_dir, "pca_kde_embeddings.png")
+        fig.savefig(out_pca_kde, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        wandb.log({"PCA/kde_contour": wandb.Image(out_pca_kde)})
 
     # ── Corner plot: all pairwise PCA-MD components ──
-    if n_pca >= 2:
+    if emb_pca is not None and n_pca >= 2:
         pairs = [(i, j) for i in range(n_pca) for j in range(i + 1, n_pca)]
         n_pairs = len(pairs)
         fig, axes = plt.subplots(1, n_pairs, figsize=(6 * n_pairs, 5))
@@ -821,6 +834,10 @@ if __name__ == "__main__":
     parser.add_argument("--min_D", type=int,    default=1000)
     parser.add_argument("--n_pca", type=int,    default=None,
                         help="Override pca_n_components from checkpoint. Use 6 for full-dim PCA.")
+    parser.add_argument("--raw_md_axis2",      action="store_true",
+                        help="Use raw Mahalanobis distance as axis 2 instead of PCA-MD.")
+    parser.add_argument("--skip_embedding_pca", action="store_true",
+                        help="Skip the 2D PCA embedding scatter/KDE visualization plots.")
     args = parser.parse_args()
 
     ABCD(vars(args))
