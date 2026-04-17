@@ -405,6 +405,7 @@ def ABCD(config):
     plt.xscale("log")
     plt.yscale("log")
     plt.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+    plt.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
     plt.xlabel("AE reco loss")
     plt.ylabel("Contrastive score (MD)")
     plt.title("AE vs Contrastive (bkg only)")
@@ -430,6 +431,7 @@ def ABCD(config):
         ax.scatter(sig_axis1, sig_axis2, s=0.5, alpha=0.4,
                    color="tab:purple", label="TpTp", rasterized=True)
     ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
+    ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("AE reco loss", fontsize=fs)
     ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
