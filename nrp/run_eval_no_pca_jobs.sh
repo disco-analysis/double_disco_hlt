@@ -54,7 +54,7 @@ spec:
               cd $BASE/modularized_nurd_hlt_con_ae
               pip install --quiet --force-reinstall --target $BASE/pylib -e . 2>/dev/null || true
 
-              python eval_abcd.py --contrast_ckpt $BASE/modularized_nurd_hlt_con_ae/checkpoints/$CKPT --contrast_test_pt $BASE/data/hlt_smcocktail_test.pt --signal_pt $BASE/data/signal_pt/hlt_signal_TpTp.pt --outdir $BASE/abcd_outputs/$OUTDIR --raw_md_axis2 --wandb_run_name $WANDB_NAME
+              python eval_abcd.py --contrast_ckpt $BASE/modularized_nurd_hlt_con_ae/checkpoints/$CKPT --contrast_test_pt $BASE/data/hlt_smcocktail_test.pt --signal_pt $BASE/data/signal_pt/hlt_signal_TpTp.pt --outdir $BASE/abcd_outputs/$OUTDIR --raw_md_axis2 --skip_embedding_pca --wandb_run_name $WANDB_NAME
 
               echo "=== Job finished: \$(date) ==="
 
