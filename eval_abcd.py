@@ -250,6 +250,7 @@ def ABCD(config):
     print("Logging in to wandb...", flush=True)
     wandb.login()
     wandb.init(project="AE vs. Contrastive ABCD",
+               name=config.get("wandb_run_name", None),
                settings=wandb.Settings(_disable_stats=True),
                config=config)
     run_name = wandb.run.name
@@ -840,6 +841,8 @@ if __name__ == "__main__":
                         help="Use raw Mahalanobis distance as axis 2 instead of PCA-MD.")
     parser.add_argument("--skip_embedding_pca", action="store_true",
                         help="Skip the 2D PCA embedding scatter/KDE visualization plots.")
+    parser.add_argument("--wandb_run_name", default=None,
+                        help="WandB run name. Defaults to WandB auto-generated name.")
     args = parser.parse_args()
 
     ABCD(vars(args))
