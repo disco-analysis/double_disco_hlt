@@ -1,13 +1,26 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: contrastive-train-mar25-bs2048  # change per run if needed
+  name: train-double-disco-mar25-bs2048
   namespace: axol1tl
 spec:
-  backoffLimit: 0                       # don't auto-retry on failure
+  backoffLimit: 0
   template:
     spec:
       restartPolicy: Never
+      tolerations:
+        - key: "nautilus.io/issue"
+          operator: "Exists"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
       containers:
         - name: train
           image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
@@ -16,48 +29,37 @@ spec:
             - |
               set -e
               echo "=== Job started: $(date) ==="
-              echo "Host: $(hostname)"
-
-              # ── Activate persistent Python env ───────────────────────────
               export PYTHONPATH=/axovol/contrastive_axis/pylib:$PYTHONPATH
               export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-              # ── Verify GPU ───────────────────────────────────────────────
               python -c "import torch; print('CUDA:', torch.cuda.is_available(), '| Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-
-              # ── Install package (editable install is ephemeral; pylib handles deps) ──
               cd /axovol/contrastive_axis/modularized_nurd_hlt_con_ae
+              grep -vE 'torch|sympy' nrp/requirements_nrp.txt | pip install --quiet --target /axovol/contrastive_axis/pylib -r /dev/stdin
               pip install --quiet --target /axovol/contrastive_axis/pylib -e . 2>/dev/null || true
-
-              # ── Run training (March 25 code, batch_size=2048) ────────────
+              cp -r /axovol/contrastive_axis/modularized_nurd_hlt_con_ae/src/embedding /axovol/contrastive_axis/pylib/
+              cp -r /axovol/contrastive_axis/modularized_nurd_hlt_con_ae/src/embedding_mar25 /axovol/contrastive_axis/pylib/
               python train_mar25.py \
                 --train_cfg configs/train_sup_con_mar25.yaml \
                 --data_cfg  configs/data_smcocktail.yaml \
                 --data      /axovol/contrastive_axis/data/hlt_smcocktail_train.pt
-
               echo "=== Job finished: $(date) ==="
-
           env:
             - name: WANDB_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: wandb-secret
                   key: WANDB_API_KEY
-
           resources:
             requests:
-              memory: "32Gi"
-              cpu: "4"
-              nvidia.com/gpu: "1"
-            limits:
               memory: "64Gi"
               cpu: "8"
-              nvidia.com/gpu: "1"
-
+              nvidia.com/a100: "1"
+            limits:
+              memory: "128Gi"
+              cpu: "16"
+              nvidia.com/a100: "1"
           volumeMounts:
             - name: axovol
               mountPath: /axovol
-
       volumes:
         - name: axovol
           persistentVolumeClaim:
