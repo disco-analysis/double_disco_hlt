@@ -12,7 +12,7 @@ from embedding.autoencoder import Autoencoder
 from embedding_mar25.training import make_train_val_split, build_train_val_loaders, train_epoch, validate_epoch, EarlyStopping, cosine_schedule_with_warmup, cosine_constrastive_schedule, linear_warmup_weight
 from embedding.utils.data_utils import compute_normalization_constants
 from embedding.utils.cfg_handler import train_config, data_config
-from embedding.utils.data_utils import compute_class_weights, load_data
+from embedding.utils.data_utils import compute_class_weights
 
 # Use GPU if available, otherwise fall back to CPU
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -91,12 +91,21 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
         logger.info("Test mode enabled: using only 10% of the data for training and validation.")
         logger.info(f"Number of events: {num_events} (10% of total)")
 
-    # Load data onto CPU — the DataLoader will move batches to GPU on the fly
-    feature_block, label_block = load_data(
-        data_path,
-        map_location="cpu", # load on CPU and move to GPU in DataLoader to avoid GPU memory issues
-        max_events=num_events if test_mode else -1,
-    )
+    # Load file once — extract PF candidates and obj features in one shot to avoid double RAM peak
+    _n = num_events if test_mode else -1
+    _raw = torch.load(data_path, map_location="cpu")
+    if isinstance(_raw, dict):
+        feature_block = _raw['pf'][:_n] if _n > 0 else _raw['pf']
+        label_block   = (_raw['label'][:_n] if _n > 0 else _raw['label']).long()
+        feature_block = torch.nan_to_num(feature_block, nan=0.0, posinf=0.0, neginf=0.0)
+        _obj_raw = (_raw["obj"][:_n] if _n > 0 else _raw["obj"]) if "obj" in _raw else None
+    else:
+        from embedding.utils.data_utils import clean_data
+        data = _raw[:_n] if _n > 0 else _raw
+        feature_block, label_block = clean_data(data)
+        _obj_raw = None
+    del _raw
+
     # Split by index so we can apply the same split to the obj-level features below
     X_tr, y_tr, X_val, y_val, idx_tr, idx_val = make_train_val_split(feature_block, label_block, val_size=val_split)
     assert X_tr.device.type == "cpu"
@@ -114,8 +123,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
     obj_tr = obj_val = None
     ae_model = None
     if disco_weight > 0.0 or closure_weight > 0.0:
-        raw = torch.load(data_path, map_location="cpu")
-        obj_all = raw["obj"][:num_events if test_mode else raw["obj"].shape[0]]
+        obj_all = _obj_raw
         # Take 4 features per PF candidate and flatten: shape (N, n_cands*4)
         # Same preprocessing as train_ae_axis1.py to keep inference consistent
         obj_flat = obj_all[:, :, :4].reshape(obj_all.shape[0], -1).float().numpy()
@@ -124,6 +132,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
         std = obj_flat.std(axis=0).astype(np.float32)
         std = np.where(std < 1e-8, 1.0, std)        # avoid division by zero for constant features
         obj_norm = torch.from_numpy((obj_flat - mu) / (std + 1e-8))
+        del obj_all, obj_flat
         # Apply the same train/val split as the PF candidate data
         obj_tr  = obj_norm[idx_tr]
         obj_val = obj_norm[idx_val]
@@ -132,6 +141,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
         logger.info(f"Loaded object-level features for AE: shape {obj_norm.shape}")
 
         ae_feat = obj_norm.shape[1]
+        del obj_norm
         ae_latent  = cfg.hp("ae_latent",  16)
         ae_enc     = cfg.hp("ae_enc_nodes", [512, 256])
         ae_dec     = cfg.hp("ae_dec_nodes", [256, 512])
