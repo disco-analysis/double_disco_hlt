@@ -70,6 +70,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
     latent_dim = cfg.hp("latent_dim", 6)             # encoder output (event-level) dimension
     proj_dim = cfg.hp("proj_dim", 12)                # projector output dimension for contrastive loss
     linear_dim = cfg.hp("linear_dim", None)          # if set, switches encoder to Linformer
+    dim_feedforward = cfg.hp("dim_feedforward", 2048) # FFN hidden size inside each transformer block
     contrast_temp = cfg.hp("contrast_temp", 0.07)   # InfoNCE temperature
     contrastive_weight = cfg.hp("contrastive_weight", 0.05) # Min (or fixed) weight on contrastive loss
     contrastive_max = cfg.hp("contrastive_max", None) # if set, ramp contrastive weight up to this value
@@ -176,6 +177,7 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
         latent_dim=latent_dim,
         num_heads=num_heads,
         num_layers=num_layers,
+        dim_feedforward=dim_feedforward,
         linear_dim=linear_dim,
         num_tokens=feature_block.size(1) if linear_dim is not None else None,
         pairwise=pairwise,

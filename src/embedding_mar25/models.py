@@ -159,6 +159,7 @@ class TransformerEncoder(nn.Module):
             latent_dim: int,
             num_heads: int = 8,
             num_layers: int = 4,
+            dim_feedforward: int = 2048,
             linear_dim: Union[int, None] = None,
             num_tokens: Union[int, None] = None,
             pre_processor: Union[nn.Module, None] = None,
@@ -171,6 +172,7 @@ class TransformerEncoder(nn.Module):
                 TransformerEncoderBlock(
                     embed_size,
                     num_heads,
+                    dim_feedforward=dim_feedforward,
                     linear_dim=linear_dim,
                     num_tokens=num_tokens+1 if num_tokens is not None else None,
                     pairwise=pairwise

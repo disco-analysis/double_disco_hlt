@@ -16,6 +16,7 @@ hyperparameters:
   num_heads: 8
   num_layers: 4
   embed_size: 128
+  dim_feedforward: 512
   latent_dim: 6
   proj_dim: 6
   linear_dim: 16
