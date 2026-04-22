@@ -102,7 +102,7 @@ def sigmoid_counts(var1, var2, cut1, cut2, weights, scale=100.0):
 
 
 def closure_loss_batch(var1, var2, weights, symmetrize=True,
-                       n_events_min=10, max_tries=20, scale=50.0, n_cuts=5):
+                       n_events_min=10, max_tries=20, scale=50.0, n_cuts=15):
     """
     ABCD closure loss on a batch.
     Normalizes both variables to their 1-99% quantile range (→ [0,1]) before
