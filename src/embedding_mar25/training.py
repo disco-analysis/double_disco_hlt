@@ -150,11 +150,17 @@ def closure_loss_batch(var1, var2, weights, symmetrize=True,
 
 def _proxy_md(latent, labels, qcd_label=1):
     """
-    Squared Mahalanobis distance — same method as EmpiricalCovariance in eval.py:
-        cov = EmpiricalCovariance().fit(bkg_latents)
-        scores = cov.mahalanobis(X)  # sum((X - mu) @ precision * (X - mu), axis=1)
+    Squared Mahalanobis distance with PCA whitening.
     Fitted on QCD events in the current batch (detached).
     Gradients flow through latent only.
+
+    Steps:
+      1. Fit μ and Σ on QCD latents.
+      2. Eigendecompose Σ = V Λ Vᵀ (torch.linalg.eigh, stable for symmetric matrices).
+      3. Build whitening matrix W = V / sqrt(λ): rotates to principal components
+         and scales each PC to unit variance.
+      4. z = (latent - μ) @ W  — whitened latent, gradients flow through here.
+      5. score = ||z||² = squared Euclidean in whitened space = MD² in original space.
     """
     qcd_mask = (labels == qcd_label)
     if qcd_mask.sum() < 2:
@@ -165,11 +171,13 @@ def _proxy_md(latent, labels, qcd_label=1):
         mu = bkg_latents.mean(0)
         centered = bkg_latents - mu
         cov = (centered.T @ centered) / bkg_latents.shape[0]
-        D = cov.shape[0]
-        precision = torch.linalg.inv(cov + 1e-6 * torch.eye(D, device=cov.device, dtype=cov.dtype))
+        # eigh returns eigenvalues ascending and eigenvectors as columns
+        L, V = torch.linalg.eigh(cov)
+        L = L.clamp(min=1e-6)          # guard against near-zero eigenvalues
+        W = V / L.sqrt()               # whitening matrix [D, D]
 
-    centered_all = latent.float() - mu
-    scores = torch.sum((centered_all @ precision) * centered_all, dim=1)
+    z = (latent.float() - mu) @ W     # whitened latent [B, D]; grads flow through latent
+    scores = (z * z).sum(dim=1)        # ||z||² = MD² in whitened space
     return scores.to(latent.dtype)
 
 

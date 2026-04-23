@@ -212,16 +212,11 @@ def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=512):
     return torch.cat(latents, dim=0).numpy(), labels.numpy()
 
 
-def mahalanobis_scores(embeddings, mu, inv_cov):
-    diffs = embeddings - mu
-    return np.einsum("bi,ij,bj->b", diffs, inv_cov, diffs).astype(np.float32)
-
-
 def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=512):
     """
-    Runs encoder+projector on test_pt_path, fits a Mahalanobis reference
-    on QCD (label==1) embeddings, and returns per-event MD scores for all events.
-    Also returns the fitted (mu, inv_cov) and model objects for reuse on signal.
+    Runs encoder on test_pt_path, fits PCA whitening on QCD (label==1) latents,
+    and returns per-event PCA-whitened MD scores (= squared Euclidean in whitened space).
+    Also returns the fitted (mu, W) and model objects for reuse on signal.
     """
     print("Loading checkpoint...", flush=True)
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -229,17 +224,21 @@ def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=512):
 
     embeddings, labels = embed_dataset(encoder, projector, test_pt_path, device, batch_size)
 
-    # fit reference on QCD (label==1)
+    # fit PCA whitening on QCD (label==1)
     qcd_mask = (labels == 1)
     ref = embeddings[qcd_mask]
-    print(f"  Fitting Mahalanobis on {qcd_mask.sum()} QCD events...", flush=True)
+    print(f"  Fitting PCA whitening on {qcd_mask.sum()} QCD events (dim={ref.shape[1]})...", flush=True)
     mu = ref.mean(axis=0)
     centered = ref - mu
-    cov = (centered.T @ centered) / ref.shape[0] + 1e-6 * np.eye(ref.shape[1])
-    inv_cov = np.linalg.inv(cov)
+    cov = (centered.T @ centered) / ref.shape[0]
+    # eigendecompose: L ascending eigenvalues, V eigenvectors as columns
+    L, V = np.linalg.eigh(cov)
+    L = np.clip(L, 1e-6, None)
+    W = V / np.sqrt(L)             # whitening matrix [D, D]
 
-    md = mahalanobis_scores(embeddings, mu, inv_cov)
-    return md, labels, mu, inv_cov, encoder, projector, embeddings
+    z = (embeddings - mu) @ W      # whitened latents [N, D]
+    md = (z * z).sum(axis=1).astype(np.float32)
+    return md, labels, mu, W, encoder, projector, embeddings
 
 
 # ─────────────────────────────────────────────
@@ -284,7 +283,7 @@ def ABCD(config):
     ckpt = torch.load(config["contrast_ckpt"], map_location=device)
 
     # ── compute contrastive MD scores ──
-    con_bkg, labels, md_mu, md_inv_cov, encoder, projector, embeddings_all = compute_md_scores(
+    con_bkg, labels, md_mu, md_W, encoder, projector, embeddings_all = compute_md_scores(
         config["contrast_ckpt"],
         config["contrast_test_pt"],
         device=device,
@@ -301,31 +300,13 @@ def ABCD(config):
     embeddings_masked = embeddings_all[mask]
     print(f"Events after masking: {mask.sum()}", flush=True)
 
-    # ── Axis 2 score: PCA-MD (default) or raw MD (--raw_md_axis2) ──
-    if not config.get("raw_md_axis2"):
-        # whiten=True scales each PC by 1/sqrt(eigenvalue) so the QCD covariance ≈ identity.
-        # MD in the whitened space = squared Euclidean distance (no precision matrix needed).
-        n_pca = config.get("n_pca") or (int(ckpt["pca_n_components"]) if "pca_n_components" in ckpt else 2)
-        _pca_eval = PCA(n_components=min(n_pca, embeddings_masked.shape[1]), whiten=True)
-        _pca_eval.fit(embeddings_masked[labels[mask] == 1])
-        emb_pca = _pca_eval.transform(embeddings_masked)
-        pca_mean_np  = _pca_eval.mean_
-        pca_comps_np = _pca_eval.components_
-        pca_stds_np  = np.sqrt(_pca_eval.explained_variance_)
-        print(f"  PCA fit on test QCD ({(labels[mask] == 1).sum()} events, {n_pca} components, whitened), "
-              f"variance explained: {_pca_eval.explained_variance_ratio_.sum()*100:.1f}%", flush=True)
-
-        # MD in whitened space = squared Euclidean distance from QCD mean
-        _mu_pca   = emb_pca[labels[mask] == 1].mean(axis=0)
-        axis2_pca = np.sum((emb_pca - _mu_pca) ** 2, axis=1).astype(np.float32)
-        print(f"  PCA-MD (whitened) computed (dim={emb_pca.shape[1]})", flush=True)
-    else:
-        # Use raw Mahalanobis distance as axis 2 (no PCA applied)
-        n_pca = 0
-        emb_pca = None
-        pca_mean_np = pca_comps_np = pca_stds_np = None
-        axis2_pca = axis2_bkg
-        print("  Using raw MD as axis 2 (no PCA)", flush=True)
+    # ── Axis 2 score: PCA-whitened MD (fitted on QCD in compute_md_scores) ──
+    # con_bkg already contains the PCA-whitened MD for all events.
+    # Compute whitened latents for the masked subset (used in corner plots).
+    emb_pca = (embeddings_masked - md_mu) @ md_W   # [N, D] whitened latents
+    n_pca = emb_pca.shape[1]                        # full latent dim (e.g. 6)
+    axis2_pca = axis2_bkg                           # con_bkg is already PCA-whitened MD
+    print(f"  PCA whitening applied (dim={n_pca}, fitted on all test QCD)", flush=True)
 
     # ── QCD-only arrays for ABCD scan and closure ──
     # DisCo was trained to decorrelate only on QCD, so closure is most meaningful on QCD.
@@ -344,18 +325,15 @@ def ABCD(config):
             torch.cuda.empty_cache()
         print("Running signal inference...", flush=True)
         sig_embeddings, _ = embed_dataset(encoder, projector, config["signal_pt"], device)
-        sig_con = mahalanobis_scores(sig_embeddings, md_mu, md_inv_cov)
+        sig_z = (sig_embeddings - md_mu) @ md_W
+        sig_con = (sig_z * sig_z).sum(axis=1).astype(np.float32)
         sig_ae  = compute_ae_scores(ckpt, config["signal_pt"], device=device)
         sig_mask = np.isfinite(sig_ae) & np.isfinite(sig_con) & (sig_ae > 0)
         sig_axis1 = sig_ae[sig_mask]
         sig_axis2 = sig_con[sig_mask]
         sig_embeddings_masked = sig_embeddings[sig_mask]
-        if not config.get("raw_md_axis2"):
-            sig_emb_pca = (sig_embeddings_masked - pca_mean_np) @ pca_comps_np.T / pca_stds_np
-            sig_axis2_pca = np.sum((sig_emb_pca - _mu_pca) ** 2, axis=1).astype(np.float32)
-        else:
-            sig_emb_pca = None
-            sig_axis2_pca = sig_axis2
+        sig_emb_pca = (sig_embeddings_masked - md_mu) @ md_W
+        sig_axis2_pca = (sig_emb_pca * sig_emb_pca).sum(axis=1).astype(np.float32)
         print(f"Signal events after masking: {sig_mask.sum()}", flush=True)
 
     # ── ABCD scan ──
