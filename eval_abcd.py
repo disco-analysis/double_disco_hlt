@@ -212,11 +212,12 @@ def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=512):
     return torch.cat(latents, dim=0).numpy(), labels.numpy()
 
 
-def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=512):
+def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=512, n_pca=None):
     """
     Runs encoder on test_pt_path, fits PCA whitening on QCD (label==1) latents,
     and returns per-event PCA-whitened MD scores (= squared Euclidean in whitened space).
     Also returns the fitted (mu, W) and model objects for reuse on signal.
+    n_pca: number of top PCA components to keep (None = keep all).
     """
     print("Loading checkpoint...", flush=True)
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -233,10 +234,15 @@ def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=512):
     cov = (centered.T @ centered) / ref.shape[0]
     # eigendecompose: L ascending eigenvalues, V eigenvectors as columns
     L, V = np.linalg.eigh(cov)
+    if n_pca is not None:
+        # keep top n_pca components (eigh returns ascending order, so take from end)
+        V = V[:, -n_pca:]
+        L = L[-n_pca:]
+        print(f"  Using top {n_pca} PCA components for MD", flush=True)
     L = np.clip(L, 1e-6, None)
-    W = V / np.sqrt(L)             # whitening matrix [D, D]
+    W = V / np.sqrt(L)             # whitening matrix [D, n_pca]
 
-    z = (embeddings - mu) @ W      # whitened latents [N, D]
+    z = (embeddings - mu) @ W      # whitened latents [N, n_pca]
     md = (z * z).sum(axis=1).astype(np.float32)
     return md, labels, mu, W, encoder, projector, embeddings
 
@@ -287,6 +293,7 @@ def ABCD(config):
         config["contrast_ckpt"],
         config["contrast_test_pt"],
         device=device,
+        n_pca=config.get("n_pca"),
     )
 
     if len(con_bkg) != len(ae_bkg):
