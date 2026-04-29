@@ -25,8 +25,8 @@ hyperparameters:
   contrastive_max: 0.10
   contrastive_warmup: 0.05
   mixed_prec: true
-  disco_weight: 1.0
-  closure_weight: 1.0
+  disco_weight: 0.1
+  closure_weight: 0.1
   disco_warmup: 0.2
   closure_warmup: 0.2
   ae_reco_weight: 1.0

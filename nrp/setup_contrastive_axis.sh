@@ -34,38 +34,24 @@ pip install --quiet --target "$PYLIB" -e modularized_nurd_hlt_con_ae/
 echo "# Add this to your shell or job script to use the persistent env:"
 echo "export PYTHONPATH=$PYLIB:\$PYTHONPATH"
 
-echo "=== 3. Download data from CERNBox (requires rclone config) ==="
-# Install rclone if needed
-if ! command -v rclone &> /dev/null; then
-    curl -fsSL https://rclone.org/install.sh | bash
-fi
-
-mkdir -p data
-
-# Check rclone config exists
-if ! rclone listremotes | grep -q "cernbox:"; then
-    echo ""
-    echo "ERROR: rclone 'cernbox' remote not configured."
-    echo "Run the following ONCE to set it up:"
-    echo ""
-    echo "  rclone config create cernbox webdav \\"
-    echo "    url https://cernbox.cern.ch/remote.php/dav/files/escheull \\"
-    echo "    vendor other \\"
-    echo "    user escheull \\"
-    echo "    pass \$(rclone obscure YOUR_CERNBOX_APP_PASSWORD)"
-    echo ""
-    echo "Get an app password at: https://cernbox.cern.ch/cernbox/desktop-app-setting"
-    echo "Then re-run this script."
-    exit 1
-fi
-
-echo "Downloading training data (withZB, ~16 GB)..."
-rclone copy cernbox:smcocktail_1M_withZB/hlt_smcocktail_train.pt data/ --progress
-rclone copy cernbox:smcocktail_1M_withZB/hlt_smcocktail_test.pt   data/ --progress
-
-echo "Downloading signal data (~2.7 GB)..."
+echo "=== 3. Data ==="
+# Data is transferred separately from EOS via ssh pipe on the local machine.
+# From your LOCAL machine run:
+#
+#   kubectl exec -n axol1tl contrastive-setup -- mkdir -p /axovol/contrastive_axis/data/signal_pt
+#
+#   ssh escheull@lxplus.cern.ch "cat /eos/user/e/escheull/smcocktail_1M_withZB/hlt_smcocktail_train.pt" \
+#     | kubectl exec -i contrastive-setup -n axol1tl -- bash -c "cat > /axovol/contrastive_axis/data/hlt_smcocktail_train.pt"
+#
+#   ssh escheull@lxplus.cern.ch "cat /eos/user/e/escheull/smcocktail_1M_withZB/hlt_smcocktail_test.pt" \
+#     | kubectl exec -i contrastive-setup -n axol1tl -- bash -c "cat > /axovol/contrastive_axis/data/hlt_smcocktail_test.pt"
+#
+#   ssh escheull@lxplus.cern.ch "cat /eos/user/e/escheull/signal_pt/hlt_signal_TpTp.pt" \
+#     | kubectl exec -i contrastive-setup -n axol1tl -- bash -c "cat > /axovol/contrastive_axis/data/signal_pt/hlt_signal_TpTp.pt"
 mkdir -p data/signal_pt
-rclone copy cernbox:signal_pt/hlt_signal_TpTp.pt data/signal_pt/ --progress
+echo "Skipping data download — transfer via ssh pipe from local machine (see comments above)."
+echo "Check existing files:"
+ls -lh data/ 2>/dev/null || true
 
 echo ""
 echo "=== Setup complete! ==="

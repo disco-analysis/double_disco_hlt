@@ -19,12 +19,12 @@ $PYTHON -m pip install -e . --quiet
 export WANDB_API_KEY=$(cat ~/.wandb_api_key)
 
 # find the latest checkpoint in ssl_checkpoints
-LATEST_CKPT=/eos/user/e/escheull/ssl_checkpoints/embedding_hlt_linformer_supcon_encoder_20260318_092447.pth
+LATEST_CKPT=/eos/user/e/escheull/ssl_checkpoints/embedding_hlt_linformer_supcon_encoder_20260403_033845.pth
 echo "Using checkpoint: $LATEST_CKPT"
 
 $PYTHON eval_abcd.py \
     --contrast_ckpt    "$LATEST_CKPT" \
-    --contrast_test_pt /eos/user/e/escheull/smcocktail_1M_noZB/hlt_smcocktail_test.pt \
+    --contrast_test_pt /eos/user/e/escheull/smcocktail_1M_withZB/hlt_smcocktail_test.pt \
     --signal_pt        /eos/user/e/escheull/signal_pt/hlt_signal_TpTp.pt \
     --outdir           /eos/user/e/escheull/abcd_outputs
 

@@ -14,6 +14,8 @@ echo "Torch CUDA: $($PYTHON -c 'import torch; print(torch.version.cuda, "| CUDA 
 
 cd /afs/cern.ch/user/e/escheull/nobackup/modularized_nurd_hlt_con_ae
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Install package in editable mode
 $PYTHON -m pip install -e . --quiet
 
@@ -32,8 +34,8 @@ export WANDB_API_KEY=$(cat ~/.wandb_api_key)
 
 $PYTHON train.py \
     --train_cfg configs/train_sup_con.yaml \
-    --data_cfg  configs/data_smcocktail.yaml \
-    --data      /eos/user/e/escheull/smcocktail_1M_noZB/hlt_smcocktail_train.pt
+    --data_cfg  configs/data_smcocktail_withZB.yaml \
+    --data      /eos/user/e/escheull/smcocktail_1M_withZB/hlt_smcocktail_train.pt
 
 echo "==== Job finished: $(date) ===="
 
