@@ -872,26 +872,30 @@ def ABCD(config):
     plt.close()
     wandb.log({"Signal/s_over_sqrtb_vs_bkg_eff": wandb.Image(sig_path)})
 
-    # 2D histogram with tightest-closure thresholds
+    # 2D scatter coloured by class with tightest-closure thresholds
     if tightest:
-        fig = plt.figure(figsize=(6, 5))
-        xbins = np.geomspace(axis1_bkg[axis1_bkg > 0].min(), axis1_bkg.max(), 201)
-        ybins = np.geomspace(axis2_bkg[axis2_bkg > 0].min(), axis2_bkg.max(), 201)
-        plt.hist2d(axis1_bkg, axis2_bkg, bins=[xbins, ybins], norm=LogNorm(vmin=1), cmin=1)
-        plt.xscale("log")
-        plt.yscale("log")
-        plt.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t1={tightest['t1']:.3g}")
-        plt.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t2={tightest['t2']:.3g}")
-        plt.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t1={t1_opt:.3g}")
-        plt.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t2={t2_opt:.3g}")
-        plt.xlabel("AE reco loss")
-        plt.ylabel("Contrastive score (MD)")
-        plt.title("AE vs Contrastive — tightest closure cut (±10%)")
-        plt.colorbar(label="Counts")
-        plt.legend(fontsize=10)
+        fig, ax = plt.subplots(figsize=(6, 5))
+        for cls, name in class_names.items():
+            m = labels_masked == cls
+            if m.sum() == 0:
+                continue
+            ax.scatter(axis1_bkg[m], axis2_bkg[m], s=0.3, alpha=0.15,
+                       color=class_colors[cls], label=name, rasterized=True)
+        for sig in signals:
+            ax.scatter(sig["axis1"], sig["axis2"], s=0.5, alpha=0.4,
+                       color=sig["color"], label=sig["label"], rasterized=True)
+        ax.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t1={tightest['t1']:.3g}")
+        ax.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t2={tightest['t2']:.3g}")
+        ax.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t1={t1_opt:.3g}")
+        ax.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t2={t2_opt:.3g}")
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel("AE reco loss", fontsize=fs)
+        ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
+        ax.set_title("AE vs Contrastive — tightest closure cut (±10%)")
+        ax.legend(markerscale=10, fontsize=fs_legend)
         out_tightest = os.path.join(plot_dir, "hist2d_tightest_cut.png")
-        plt.savefig(out_tightest, dpi=200, bbox_inches="tight")
-        plt.close()
+        fig.savefig(out_tightest, dpi=200, bbox_inches="tight")
+        plt.close(fig)
         wandb.log({"Hists2D/tightest_cut": wandb.Image(out_tightest)})
 
     wandb.finish()
