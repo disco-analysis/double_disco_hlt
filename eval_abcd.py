@@ -17,6 +17,7 @@ from embedding.autoencoder import Autoencoder
 from embedding.preprocs import PFPreProcessor
 from embedding.utils.data_utils import load_data
 
+_SIG_COLORS = ["tab:purple", "tab:brown", "tab:olive", "tab:pink", "tab:cyan"]
 
 # ─────────────────────────────────────────────
 # ABCD helpers
@@ -267,6 +268,16 @@ def ABCD(config):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # ── parse signal list ──
+    signal_pts = config.get("signal_pt") or []
+    signal_labels_cfg = config.get("signal_label") or []
+    if isinstance(signal_pts, str):
+        signal_pts = [signal_pts]
+    if isinstance(signal_labels_cfg, str):
+        signal_labels_cfg = [signal_labels_cfg]
+    while len(signal_labels_cfg) < len(signal_pts):
+        signal_labels_cfg.append(f"Signal{len(signal_labels_cfg) + 1}")
+
     # ── load checkpoint once (shared by both AE and contrastive inference) ──
     ckpt = torch.load(config["contrast_ckpt"], map_location=device)
 
@@ -322,29 +333,36 @@ def ABCD(config):
     axis2_qcd = axis2_pca[qcd_only]  # ABCD/closure on PCA-MD
     print(f"QCD events for ABCD: {qcd_only.sum()}", flush=True)
 
-    # ── signal inference (optional) ──
-    sig_axis1 = sig_axis2 = sig_axis2_pca = None
-    sig_embeddings_masked = None
-    sig_emb_pca = None
-    if config.get("signal_pt"):
+    # ── signal inference ──
+    signals = []
+    for sig_pt, sig_label, sig_color in zip(signal_pts, signal_labels_cfg, _SIG_COLORS):
         gc.collect()
         if device == "cuda":
             torch.cuda.empty_cache()
-        print("Running signal inference...", flush=True)
-        sig_embeddings, _ = embed_dataset(encoder, projector, config["signal_pt"], device)
-        sig_z = (sig_embeddings - md_mu) @ md_W
+        print(f"Running {sig_label} signal inference...", flush=True)
+        sig_embeddings, _ = embed_dataset(encoder, projector, sig_pt, device)
+        sig_z   = (sig_embeddings - md_mu) @ md_W
         sig_con = (sig_z * sig_z).sum(axis=1).astype(np.float32)
-        sig_ae  = compute_ae_scores(ckpt, config["signal_pt"], device=device)
+        sig_ae  = compute_ae_scores(ckpt, sig_pt, device=device)
         sig_mask = np.isfinite(sig_ae) & np.isfinite(sig_con) & (sig_ae > 0)
-        sig_axis1 = sig_ae[sig_mask]
-        sig_axis2 = sig_con[sig_mask]
-        sig_embeddings_masked = sig_embeddings[sig_mask]
-        sig_emb_pca = (sig_embeddings_masked - md_mu) @ md_W
-        sig_axis2_pca = (sig_emb_pca * sig_emb_pca).sum(axis=1).astype(np.float32)
-        print(f"Signal events after masking: {sig_mask.sum()}", flush=True)
+        sig_axis1      = sig_ae[sig_mask]
+        sig_axis2      = sig_con[sig_mask]
+        sig_emb_masked = sig_embeddings[sig_mask]
+        sig_emb_pca    = (sig_emb_masked - md_mu) @ md_W
+        sig_axis2_pca  = (sig_emb_pca * sig_emb_pca).sum(axis=1).astype(np.float32)
+        print(f"  {sig_label} events after masking: {sig_mask.sum()}", flush=True)
+        signals.append({
+            "label":    sig_label,
+            "color":    sig_color,
+            "axis1":    sig_axis1,
+            "axis2":    sig_axis2,
+            "axis2_pca": sig_axis2_pca,
+            "embeddings": sig_emb_masked,
+            "emb_pca":  sig_emb_pca,
+        })
 
     # ── ABCD scan ──
-    percent = np.linspace(0.75, 0.98, 24)
+    percent = np.linspace(0.75, 0.9995, 60)
     best    = {"nonclosure": np.inf}
     min_A   = int(config.get("min_A", 50))
     min_D   = int(config.get("min_D", 500))
@@ -413,9 +431,9 @@ def ABCD(config):
             continue
         ax.scatter(axis1_bkg[m], axis2_bkg[m], s=0.3, alpha=0.15,
                    color=class_colors[cls], label=name, rasterized=True)
-    if sig_axis1 is not None:
-        ax.scatter(sig_axis1, sig_axis2, s=0.5, alpha=0.4,
-                   color="tab:purple", label="TpTp", rasterized=True)
+    for sig in signals:
+        ax.scatter(sig["axis1"], sig["axis2"], s=0.5, alpha=0.4,
+                   color=sig["color"], label=sig["label"], rasterized=True)
     ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
     ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
     ax.set_xscale("log"); ax.set_yscale("log")
@@ -428,22 +446,22 @@ def ABCD(config):
     plt.close(fig)
     wandb.log({"Hists2D/by_class_combined": wandb.Image(out_combined)})
 
-    # individual hist2d for signal
-    if sig_axis1 is not None:
+    # individual hist2d per signal
+    for sig in signals:
         fig = plt.figure(figsize=(6, 5))
-        xbins_s = np.geomspace(sig_axis1[sig_axis1 > 0].min(), sig_axis1.max(), 101)
-        ybins_s = np.geomspace(sig_axis2[sig_axis2 > 0].min(), sig_axis2.max(), 101)
-        plt.hist2d(sig_axis1, sig_axis2, bins=[xbins_s, ybins_s], norm=LogNorm(vmin=1), cmin=1)
+        xbins_s = np.geomspace(sig["axis1"][sig["axis1"] > 0].min(), sig["axis1"].max(), 101)
+        ybins_s = np.geomspace(sig["axis2"][sig["axis2"] > 0].min(), sig["axis2"].max(), 101)
+        plt.hist2d(sig["axis1"], sig["axis2"], bins=[xbins_s, ybins_s], norm=LogNorm(vmin=1), cmin=1)
         plt.xscale("log"); plt.yscale("log")
         plt.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
         plt.xlabel("AE reco loss", fontsize=fs)
         plt.ylabel("Contrastive score (MD)", fontsize=fs)
-        plt.title("AE vs Contrastive — TpTp (signal)")
+        plt.title(f"AE vs Contrastive — {sig['label']} (signal)")
         plt.colorbar(label="Counts")
-        out_sig = os.path.join(plot_dir, "hist2d_TpTp.png")
+        out_sig = os.path.join(plot_dir, f"hist2d_{sig['label']}.png")
         plt.savefig(out_sig, dpi=200, bbox_inches="tight")
         plt.close()
-        wandb.log({"Hists2D/TpTp": wandb.Image(out_sig)})
+        wandb.log({f"Hists2D/{sig['label']}": wandb.Image(out_sig)})
 
     # individual hist2d per class
     for cls, name in class_names.items():
@@ -476,9 +494,9 @@ def ABCD(config):
                 continue
             ax.scatter(axis1_bkg[m], axis2_pca[m],
                        s=0.3, alpha=0.15, color=class_colors[cls], label=name, rasterized=True)
-        if sig_axis1 is not None and sig_axis2_pca is not None:
-            ax.scatter(sig_axis1, sig_axis2_pca, s=0.5, alpha=0.4,
-                       color="tab:purple", label="TpTp", rasterized=True)
+        for sig in signals:
+            ax.scatter(sig["axis1"], sig["axis2_pca"], s=0.5, alpha=0.4,
+                       color=sig["color"], label=sig["label"], rasterized=True)
         ax.axvline(t1_opt, color="black", linestyle="--", linewidth=1.0)
         ax.axhline(t2_opt, color="black", linestyle="--", linewidth=1.0)
         ax.set_xscale("log"); ax.set_yscale("log")
@@ -497,15 +515,18 @@ def ABCD(config):
         rng_pca = np.random.default_rng(42)
         fig, ax = plt.subplots(figsize=fig_size)
         kde_legend_handles = []
-        all_classes_for_kde = list(class_names.items())
-        if sig_axis1 is not None and sig_axis2_pca is not None:
-            all_classes_for_kde.append((-1, "TpTp"))
 
-        # compute global log-space range across all classes so contours aren't clipped
+        # compute global log-space range across all classes + signals
         all_lx, all_ly = [], []
-        for cls, name in all_classes_for_kde:
-            x_raw = sig_axis1 if cls == -1 else axis1_bkg[labels_masked == cls]
-            y_raw = sig_axis2_pca if cls == -1 else axis2_pca[labels_masked == cls]
+        for cls, name in class_names.items():
+            x_raw = axis1_bkg[labels_masked == cls]
+            y_raw = axis2_pca[labels_masked == cls]
+            valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
+            if valid.sum() >= 50:
+                all_lx.append(np.log10(x_raw[valid]))
+                all_ly.append(np.log10(y_raw[valid]))
+        for sig in signals:
+            x_raw, y_raw = sig["axis1"], sig["axis2_pca"]
             valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
             if valid.sum() >= 50:
                 all_lx.append(np.log10(x_raw[valid]))
@@ -514,17 +535,12 @@ def ABCD(config):
         gly_min, gly_max = np.concatenate(all_ly).min(), np.concatenate(all_ly).max()
         xi_global, yi_global = np.mgrid[glx_min:glx_max:200j, gly_min:gly_max:200j]
 
-        for cls, name in all_classes_for_kde:
-            if cls == -1:
-                x_raw, y_raw = sig_axis1, sig_axis2_pca
-                color = "tab:purple"
-            else:
-                m = labels_masked == cls
-                if m.sum() < 50:
-                    continue
-                x_raw, y_raw = axis1_bkg[m], axis2_pca[m]
-                color = class_colors[cls]
-
+        for cls, name in class_names.items():
+            m = labels_masked == cls
+            if m.sum() < 50:
+                continue
+            x_raw, y_raw = axis1_bkg[m], axis2_pca[m]
+            color = class_colors[cls]
             valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
             lx = np.log10(x_raw[valid])
             ly = np.log10(y_raw[valid])
@@ -535,9 +551,24 @@ def ABCD(config):
             zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
             ax.contour(10**xi_global, 10**yi_global, zi.reshape(xi_global.shape),
                        colors=color, alpha=0.7, linewidths=1.5)
-            kde_legend_handles.append(
-                Line2D([0], [0], color=color, linewidth=1.5, label=name)
-            )
+            kde_legend_handles.append(Line2D([0], [0], color=color, linewidth=1.5, label=name))
+
+        for sig in signals:
+            x_raw, y_raw = sig["axis1"], sig["axis2_pca"]
+            color = sig["color"]
+            valid = (x_raw > 0) & (y_raw > 0) & np.isfinite(x_raw) & np.isfinite(y_raw)
+            lx = np.log10(x_raw[valid])
+            ly = np.log10(y_raw[valid])
+            if lx.shape[0] > 20_000:
+                idx = rng_pca.choice(lx.shape[0], 20_000, replace=False)
+                lx, ly = lx[idx], ly[idx]
+            if lx.shape[0] < 50:
+                continue
+            kde = gaussian_kde(np.vstack([lx, ly]))
+            zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
+            ax.contour(10**xi_global, 10**yi_global, zi.reshape(xi_global.shape),
+                       colors=color, alpha=0.7, linewidths=1.5)
+            kde_legend_handles.append(Line2D([0], [0], color=color, linewidth=1.5, label=sig["label"]))
 
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel("AE reco loss", fontsize=fs)
@@ -560,9 +591,8 @@ def ABCD(config):
         pca.fit(embeddings_masked[labels_masked == 1])
         emb_2d = pca.transform(embeddings_masked)
 
-        sig_emb_2d = None
-        if sig_embeddings_masked is not None:
-            sig_emb_2d = pca.transform(sig_embeddings_masked)
+        for sig in signals:
+            sig["emb_2d"] = pca.transform(sig["embeddings"])
 
         # PCA scatter
         fig, ax = plt.subplots(figsize=fig_size)
@@ -573,10 +603,10 @@ def ABCD(config):
             ax.scatter(emb_2d[m, 0], emb_2d[m, 1],
                        s=0.5, alpha=0.12, color=class_colors[cls],
                        label=name, rasterized=True)
-        if sig_emb_2d is not None:
-            ax.scatter(sig_emb_2d[:, 0], sig_emb_2d[:, 1],
-                       s=0.5, alpha=0.4, color="tab:purple",
-                       label="TpTp", rasterized=True)
+        for sig in signals:
+            ax.scatter(sig["emb_2d"][:, 0], sig["emb_2d"][:, 1],
+                       s=0.5, alpha=0.4, color=sig["color"],
+                       label=sig["label"], rasterized=True)
         ax.set_xlabel("PCA Component 1", fontsize=fs)
         ax.set_ylabel("PCA Component 2", fontsize=fs)
         ax.set_title("Encoder embeddings — PCA (fit on QCD)")
@@ -593,12 +623,12 @@ def ABCD(config):
         fig, ax = plt.subplots(figsize=fig_size)
         legend_handles = []
 
-        # global range across all classes so contours aren't clipped
+        # global range across all classes + signals
         all_emb_x = [emb_2d[labels_masked == cls, 0] for cls in class_names if (labels_masked == cls).sum() >= 50]
         all_emb_y = [emb_2d[labels_masked == cls, 1] for cls in class_names if (labels_masked == cls).sum() >= 50]
-        if sig_emb_2d is not None:
-            all_emb_x.append(sig_emb_2d[:, 0])
-            all_emb_y.append(sig_emb_2d[:, 1])
+        for sig in signals:
+            all_emb_x.append(sig["emb_2d"][:, 0])
+            all_emb_y.append(sig["emb_2d"][:, 1])
         gx_min, gx_max = np.concatenate(all_emb_x).min(), np.concatenate(all_emb_x).max()
         gy_min, gy_max = np.concatenate(all_emb_y).min(), np.concatenate(all_emb_y).max()
         xi_g, yi_g = np.mgrid[gx_min:gx_max:200j, gy_min:gy_max:200j]
@@ -618,18 +648,22 @@ def ABCD(config):
             legend_handles.append(
                 Line2D([0], [0], color=class_colors[cls], linewidth=1.5, label=name)
             )
-        if sig_emb_2d is not None:
-            xs, ys = sig_emb_2d[:, 0], sig_emb_2d[:, 1]
+
+        for sig in signals:
+            xs, ys = sig["emb_2d"][:, 0], sig["emb_2d"][:, 1]
             if xs.shape[0] > 20_000:
                 idx = rng.choice(xs.shape[0], 20_000, replace=False)
                 xs, ys = xs[idx], ys[idx]
+            if xs.shape[0] < 50:
+                continue
             kde_s = gaussian_kde(np.vstack([xs, ys]))
             zi_s = kde_s(np.vstack([xi_g.flatten(), yi_g.flatten()]))
             ax.contour(xi_g, yi_g, zi_s.reshape(xi_g.shape),
-                       colors="tab:purple", alpha=0.7, linewidths=1.5)
+                       colors=sig["color"], alpha=0.7, linewidths=1.5)
             legend_handles.append(
-                Line2D([0], [0], color="tab:purple", linewidth=1.5, label="TpTp")
+                Line2D([0], [0], color=sig["color"], linewidth=1.5, label=sig["label"])
             )
+
         ax.set_xlabel("PCA Component 1", fontsize=fs)
         ax.set_ylabel("PCA Component 2", fontsize=fs)
         ax.set_title("KDE contours — encoder embeddings PCA (fit on QCD)")
@@ -657,10 +691,10 @@ def ABCD(config):
                 ax.scatter(emb_pca[m, ci], emb_pca[m, cj],
                            s=0.3, alpha=0.12, color=class_colors[cls],
                            label=name, rasterized=True)
-            if sig_emb_pca is not None:
-                ax.scatter(sig_emb_pca[:, ci], sig_emb_pca[:, cj],
-                           s=0.5, alpha=0.4, color="tab:purple",
-                           label="TpTp", rasterized=True)
+            for sig in signals:
+                ax.scatter(sig["emb_pca"][:, ci], sig["emb_pca"][:, cj],
+                           s=0.5, alpha=0.4, color=sig["color"],
+                           label=sig["label"], rasterized=True)
             ax.set_xlabel(f"PCA Component {ci + 1}", fontsize=fs)
             ax.set_ylabel(f"PCA Component {cj + 1}", fontsize=fs)
             ax.legend(markerscale=10, fontsize=fs_legend)
@@ -736,6 +770,7 @@ def ABCD(config):
 
     # 1D scan for closure + S/sqrt(B)
     effs, closure_ratio, closure_unc, s_over_sqrtb = [], [], [], []
+    scan_t1, scan_t2 = [], []
     Ntot_bkg = float(len(axis1_qcd))
 
     for p in percent:
@@ -753,20 +788,47 @@ def ABCD(config):
         closure_ratio.append(ratio)
         closure_unc.append(sigma)
         s_over_sqrtb.append(0.0 / np.sqrt(max(A, 1e-8)))  # no signal yet
+        scan_t1.append(t1)
+        scan_t2.append(t2)
 
     effs          = np.array(effs)
     closure_ratio = np.array(closure_ratio)
     closure_unc   = np.array(closure_unc)
     s_over_sqrtb  = np.array(s_over_sqrtb)
+    scan_t1       = np.array(scan_t1)
+    scan_t2       = np.array(scan_t2)
 
     order         = np.argsort(effs)
     effs          = effs[order]
     closure_ratio = closure_ratio[order]
     closure_unc   = closure_unc[order]
     s_over_sqrtb  = s_over_sqrtb[order]
+    scan_t1       = scan_t1[order]
+    scan_t2       = scan_t2[order]
 
     eff_opt   = best["A"] / max(Ntot_bkg, 1.0)
     ratio_opt = best["A_hat"] / max(best["A"], 1e-8)
+
+    # tightest cut still within ±5% closure band
+    closure_tol = config.get("closure_tolerance", 0.10)
+    within_band = np.abs(closure_ratio - 1.0) <= closure_tol
+    tightest = {}
+    if within_band.any():
+        idx = int(np.where(within_band)[0].min())   # smallest eff = tightest cut
+        tightest = {
+            "eff":   float(effs[idx]),
+            "ratio": float(closure_ratio[idx]),
+            "t1":    float(scan_t1[idx]),
+            "t2":    float(scan_t2[idx]),
+        }
+        print(f"Tightest good cut (|closure|<={closure_tol*100:.0f}%): "
+              f"eff={tightest['eff']:.2e}, t1={tightest['t1']:.4g}, t2={tightest['t2']:.4g}", flush=True)
+        wandb.log({
+            "Closure/tightest_eff":  tightest["eff"],
+            "Closure/tightest_t1":   tightest["t1"],
+            "Closure/tightest_t2":   tightest["t2"],
+            "Closure/tightest_ratio": tightest["ratio"],
+        })
 
     # closure plot
     fig, ax = plt.subplots(figsize=fig_size)
@@ -779,6 +841,10 @@ def ABCD(config):
     ax.plot(effs, np.full_like(effs, 0.95),    linestyle="--", color="black")
     ax.plot(effs, np.full_like(effs, 1.05),    linestyle="--", color="black")
     ax.plot([eff_opt], [ratio_opt], marker="o", c="red", label="Optimized")
+    if tightest:
+        ax.axvline(tightest["eff"], color="blue", linestyle=":", linewidth=1.5)
+        ax.plot([tightest["eff"]], [tightest["ratio"]], marker="o", c="blue",
+                label=f"Tightest (±10%): t1={tightest['t1']:.3g}, t2={tightest['t2']:.3g}")
     ax.set_xlabel("Selection Efficiency (bkg A/Ntot)", fontsize=fs)
     ax.set_ylabel("Predicted Bkg. / True Bkg.",        fontsize=fs)
     ax.set_ylim([0.0, 1.5])
@@ -806,6 +872,28 @@ def ABCD(config):
     plt.close()
     wandb.log({"Signal/s_over_sqrtb_vs_bkg_eff": wandb.Image(sig_path)})
 
+    # 2D histogram with tightest-closure thresholds
+    if tightest:
+        fig = plt.figure(figsize=(6, 5))
+        xbins = np.geomspace(axis1_bkg[axis1_bkg > 0].min(), axis1_bkg.max(), 201)
+        ybins = np.geomspace(axis2_bkg[axis2_bkg > 0].min(), axis2_bkg.max(), 201)
+        plt.hist2d(axis1_bkg, axis2_bkg, bins=[xbins, ybins], norm=LogNorm(vmin=1), cmin=1)
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t1={tightest['t1']:.3g}")
+        plt.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t2={tightest['t2']:.3g}")
+        plt.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t1={t1_opt:.3g}")
+        plt.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t2={t2_opt:.3g}")
+        plt.xlabel("AE reco loss")
+        plt.ylabel("Contrastive score (MD)")
+        plt.title("AE vs Contrastive — tightest closure cut (±10%)")
+        plt.colorbar(label="Counts")
+        plt.legend(fontsize=10)
+        out_tightest = os.path.join(plot_dir, "hist2d_tightest_cut.png")
+        plt.savefig(out_tightest, dpi=200, bbox_inches="tight")
+        plt.close()
+        wandb.log({"Hists2D/tightest_cut": wandb.Image(out_tightest)})
+
     wandb.finish()
 
 
@@ -815,8 +903,10 @@ if __name__ == "__main__":
     parser.add_argument("--contrast_test_pt",   required=True)
     parser.add_argument("--ae_scores_bkg_test", default=None,
                         help="Pre-computed AE scores .pt file. Not needed if checkpoint contains a joint AE.")
-    parser.add_argument("--signal_pt", default=None,
-                        help="Optional signal .pt file for inference overlay on 2D histogram.")
+    parser.add_argument("--signal_pt", nargs="*", default=None,
+                        help="Signal .pt file(s). Pass one or more paths.")
+    parser.add_argument("--signal_label", nargs="*", default=None,
+                        help="Label(s) for signal sample(s). Must match --signal_pt count.")
     parser.add_argument("--outdir",             default="outputs_abcd")
     parser.add_argument("--min_A", type=int,    default=200)
     parser.add_argument("--min_D", type=int,    default=1000)
