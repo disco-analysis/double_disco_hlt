@@ -30,7 +30,7 @@ formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
-def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bool = False):
+def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bool = False, qcd_data: str = None):
 
     # ── WandB init ─────────────────────────────────────────────────────────────
     # Dump the full config so every run is fully reproducible from the wandb page.
@@ -116,6 +116,35 @@ def main(data_path: str, cfg: train_config, cfg_data: data_config, test_mode: bo
     # Grab obj features now, before freeing _raw
     _obj_raw = _raw["obj"][:_n] if (need_ae and isinstance(_raw, dict) and "obj" in _raw and _n > 0) else (_raw["obj"] if (need_ae and isinstance(_raw, dict) and "obj" in _raw) else None)
     del _raw  # free the full file — PF data is already in feature_block
+
+    # Replace QCD events (label==1) with a separate QCD file if requested
+    if qcd_data is not None:
+        keep_mask = label_block != 1
+        feature_block = feature_block[keep_mask]
+        label_block   = label_block[keep_mask]
+        if _obj_raw is not None:
+            _obj_raw = _obj_raw[keep_mask]
+
+        _qcd = torch.load(qcd_data, map_location="cpu")
+        if isinstance(_qcd, dict):
+            qcd_pf  = _qcd['pf']
+            qcd_obj = _qcd.get('obj', None)
+        else:
+            from embedding.utils.data_utils import clean_data as _clean
+            qcd_pf, _ = _clean(_qcd)
+            qcd_obj = None
+        qcd_pf = torch.nan_to_num(qcd_pf.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        qcd_label = torch.ones(qcd_pf.shape[0], dtype=torch.long)
+
+        feature_block = torch.cat([feature_block, qcd_pf], dim=0)
+        label_block   = torch.cat([label_block, qcd_label], dim=0)
+        if _obj_raw is not None:
+            if qcd_obj is not None:
+                _obj_raw = torch.cat([_obj_raw, qcd_obj], dim=0)
+            else:
+                _obj_raw = torch.cat([_obj_raw, torch.zeros(qcd_pf.shape[0], _obj_raw.shape[1], _obj_raw.shape[2], dtype=_obj_raw.dtype)], dim=0)
+        del _qcd, qcd_pf, qcd_label
+        logger.info(f"Replaced QCD (label==1) with {qcd_data}. Dataset size: {feature_block.shape[0]}")
 
     # Split by index so we can apply the same split to the obj-level features below
     X_tr, y_tr, X_val, y_val, idx_tr, idx_val = make_train_val_split(feature_block, label_block, val_size=val_split)
@@ -403,6 +432,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_cfg", required=True, help="Path to the training config .yaml file")
     parser.add_argument("--data", required=True, help="Path to the input .pt file")
     parser.add_argument("--test_mode", action="store_true", help="If set, runs training with only 10 percent of the data.")
+    parser.add_argument("--qcd_data", default=None, help="If set, replaces QCD events (label==1) in the main dataset with events from this file.")
     args = parser.parse_args()
 
     tr_cfg = train_config(args.train_cfg)
@@ -414,4 +444,4 @@ if __name__ == "__main__":
     logger.info(f"Using data processing config file: {args.data_cfg}")
     logger.info(f"Entire data processing config: {data_cfg.get_entire_cfg()}")
 
-    main(args.data, tr_cfg, data_cfg, test_mode=args.test_mode)
+    main(args.data, tr_cfg, data_cfg, test_mode=args.test_mode, qcd_data=args.qcd_data)
