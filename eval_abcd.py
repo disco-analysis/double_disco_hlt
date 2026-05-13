@@ -901,30 +901,15 @@ def ABCD(config):
         for sig in signals:
             ax.scatter(sig["axis1"], sig["axis2"], s=0.5, alpha=0.4,
                        color=sig["color"], label=sig["label"], rasterized=True)
-        ax.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5)
-        ax.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5)
-        ax.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0)
-        ax.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0)
+        ax.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t1={tightest['t1']:.3g}")
+        ax.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t2={tightest['t2']:.3g}")
+        ax.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t1={t1_opt:.3g}")
+        ax.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t2={t2_opt:.3g}")
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel("AE reco loss", fontsize=fs)
         ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
         ax.set_title("AE vs Contrastive — tightest closure cut (±10%)")
-        # compact legend: classes + signals only; lines shown via text box
-        legend_handles, legend_labels = ax.get_legend_handles_labels()
-        legend_handles += [
-            Line2D([0], [0], color="blue",  linestyle="--", linewidth=1.5),
-            Line2D([0], [0], color="black", linestyle=":",  linewidth=1.0),
-        ]
-        legend_labels += ["Tightest", "Optimal"]
-        ax.legend(legend_handles, legend_labels,
-                  markerscale=8, fontsize=11, ncol=2,
-                  loc="upper left", framealpha=0.7)
-        # threshold values as a small text box
-        textstr = (f"Tightest: t1={tightest['t1']:.3g}, t2={tightest['t2']:.3g}\n"
-                   f"Optimal:  t1={t1_opt:.3g}, t2={t2_opt:.3g}")
-        ax.text(0.98, 0.02, textstr, transform=ax.transAxes,
-                fontsize=9, verticalalignment="bottom", horizontalalignment="right",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
+        ax.legend(markerscale=10, fontsize=fs_legend, loc="lower right")
         out_tightest = os.path.join(plot_dir, "hist2d_tightest_cut.png")
         fig.savefig(out_tightest, dpi=200, bbox_inches="tight")
         plt.close(fig)
