@@ -19,6 +19,22 @@ from embedding.utils.data_utils import load_data
 
 _SIG_COLORS = ["tab:purple", "tab:brown", "tab:olive", "tab:pink", "tab:cyan"]
 
+# Map filename keywords → physics display names
+_SIGNAL_DISPLAY_NAMES = {
+    "TpTp":     "T'T'",
+    "VBFHto2B": "VBF H$\\to$b$\\bar{b}$",
+    "VBF":      "VBF",
+    "ttbar":    r"$t\bar{t}$",
+    "TTbar":    r"$t\bar{t}$",
+}
+
+def _signal_display_name(label: str, pt_path: str = "") -> str:
+    """Return a physics display name for a signal, using filename if label is generic."""
+    for key, display in _SIGNAL_DISPLAY_NAMES.items():
+        if key in label or key in pt_path:
+            return display
+    return label
+
 # ─────────────────────────────────────────────
 # ABCD helpers
 # ─────────────────────────────────────────────
@@ -339,7 +355,8 @@ def ABCD(config):
         gc.collect()
         if device == "cuda":
             torch.cuda.empty_cache()
-        print(f"Running {sig_label} signal inference...", flush=True)
+        display_label = _signal_display_name(sig_label, sig_pt)
+        print(f"Running {display_label} signal inference...", flush=True)
         sig_embeddings, _ = embed_dataset(encoder, projector, sig_pt, device)
         sig_z   = (sig_embeddings - md_mu) @ md_W
         sig_con = (sig_z * sig_z).sum(axis=1).astype(np.float32)
@@ -350,9 +367,9 @@ def ABCD(config):
         sig_emb_masked = sig_embeddings[sig_mask]
         sig_emb_pca    = (sig_emb_masked - md_mu) @ md_W
         sig_axis2_pca  = (sig_emb_pca * sig_emb_pca).sum(axis=1).astype(np.float32)
-        print(f"  {sig_label} events after masking: {sig_mask.sum()}", flush=True)
+        print(f"  {display_label} events after masking: {sig_mask.sum()}", flush=True)
         signals.append({
-            "label":    sig_label,
+            "label":    display_label,
             "color":    sig_color,
             "axis1":    sig_axis1,
             "axis2":    sig_axis2,
@@ -884,15 +901,30 @@ def ABCD(config):
         for sig in signals:
             ax.scatter(sig["axis1"], sig["axis2"], s=0.5, alpha=0.4,
                        color=sig["color"], label=sig["label"], rasterized=True)
-        ax.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t1={tightest['t1']:.3g}")
-        ax.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t2={tightest['t2']:.3g}")
-        ax.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t1={t1_opt:.3g}")
-        ax.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t2={t2_opt:.3g}")
+        ax.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5)
+        ax.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5)
+        ax.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0)
+        ax.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0)
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel("AE reco loss", fontsize=fs)
         ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
         ax.set_title("AE vs Contrastive — tightest closure cut (±10%)")
-        ax.legend(markerscale=10, fontsize=fs_legend)
+        # compact legend: classes + signals only; lines shown via text box
+        legend_handles, legend_labels = ax.get_legend_handles_labels()
+        legend_handles += [
+            Line2D([0], [0], color="blue",  linestyle="--", linewidth=1.5),
+            Line2D([0], [0], color="black", linestyle=":",  linewidth=1.0),
+        ]
+        legend_labels += ["Tightest", "Optimal"]
+        ax.legend(legend_handles, legend_labels,
+                  markerscale=8, fontsize=11, ncol=2,
+                  loc="upper left", framealpha=0.7)
+        # threshold values as a small text box
+        textstr = (f"Tightest: t1={tightest['t1']:.3g}, t2={tightest['t2']:.3g}\n"
+                   f"Optimal:  t1={t1_opt:.3g}, t2={t2_opt:.3g}")
+        ax.text(0.98, 0.02, textstr, transform=ax.transAxes,
+                fontsize=9, verticalalignment="bottom", horizontalalignment="right",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
         out_tightest = os.path.join(plot_dir, "hist2d_tightest_cut.png")
         fig.savefig(out_tightest, dpi=200, bbox_inches="tight")
         plt.close(fig)
