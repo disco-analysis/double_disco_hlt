@@ -8,6 +8,19 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      tolerations:
+        - key: "nautilus.io/issue"
+          operator: "Exists"
+          effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
       containers:
         - name: train
           image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
@@ -47,13 +60,13 @@ spec:
 
           resources:
             requests:
-              memory: "32Gi"
-              cpu: "4"
-              nvidia.com/gpu: "1"
-            limits:
               memory: "64Gi"
               cpu: "8"
-              nvidia.com/gpu: "1"
+              nvidia.com/a100: "1"
+            limits:
+              memory: "128Gi"
+              cpu: "16"
+              nvidia.com/a100: "1"
 
           volumeMounts:
             - name: axovol
