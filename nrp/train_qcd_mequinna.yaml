@@ -31,7 +31,7 @@ spec:
 
               # ── Run training ─────────────────────────────────────────────
               python train.py \
-                --train_cfg configs/train_sup_con_ce.yaml \
+                --train_cfg configs/train_best_config_yet.yaml \
                 --data_cfg  configs/data_smcocktail.yaml \
                 --data      /axovol/contrastive_axis/data/hlt_smcocktail_train.pt \
                 --qcd_data  /axovol/contrastive_axis/data/hlt_qcd_1M.pt
