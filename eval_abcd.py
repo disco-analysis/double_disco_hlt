@@ -901,10 +901,10 @@ def ABCD(config):
         for sig in signals:
             ax.scatter(sig["axis1"], sig["axis2"], s=0.5, alpha=0.4,
                        color=sig["color"], label=sig["label"], rasterized=True)
-        ax.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t1={tightest['t1']:.3g}")
-        ax.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5, label=f"Tightest t2={tightest['t2']:.3g}")
-        ax.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t1={t1_opt:.3g}")
-        ax.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0, label=f"Optimized t2={t2_opt:.3g}")
+        ax.axvline(tightest["t1"], color="blue",  linestyle="--", linewidth=1.5, label="Tightest")
+        ax.axhline(tightest["t2"], color="blue",  linestyle="--", linewidth=1.5)
+        ax.axvline(t1_opt,         color="black", linestyle=":",  linewidth=1.0, label="Optimized")
+        ax.axhline(t2_opt,         color="black", linestyle=":",  linewidth=1.0)
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel("AE reco loss", fontsize=fs)
         ax.set_ylabel("Contrastive score (MD)", fontsize=fs)
