@@ -19,6 +19,45 @@ from embedding.utils.data_utils import load_data
 
 _SIG_COLORS = ["tab:purple", "tab:brown", "tab:olive", "tab:pink", "tab:cyan"]
 
+
+def _load_pt(data_or_path):
+    if isinstance(data_or_path, str):
+        return torch.load(data_or_path, map_location="cpu")
+    return data_or_path
+
+
+def load_eval_data(test_pt_path, qcd_pt_path=None):
+    """
+    Build the background eval dataset.
+
+    Default (qcd_pt_path=None): returns test_pt_path unchanged.
+
+    With qcd_pt_path: strips QCD (label==1) from test_pt_path and replaces it
+    with events from qcd_pt_path (labels overwritten to 1).  No training overlap
+    because test_pt_path should be smcocktail_test.pt (separate file from
+    smcocktail_train.pt), and qcd_pt_path should be the held-out mquinna test
+    slice that was never seen during training.
+    """
+    if qcd_pt_path is None:
+        return test_pt_path
+
+    bkg = torch.load(test_pt_path, map_location="cpu")
+    non_qcd = bkg["label"] != 1
+    print(f"  Non-QCD events from {test_pt_path}: {int(non_qcd.sum())}", flush=True)
+
+    qcd = torch.load(qcd_pt_path, map_location="cpu")
+    n_qcd = qcd["pf"].shape[0]
+    print(f"  QCD events from {qcd_pt_path}: {n_qcd} (relabeled to 1)", flush=True)
+
+    merged = {
+        "pf":    torch.cat([bkg["pf"][non_qcd],  qcd["pf"]],  dim=0),
+        "obj":   torch.cat([bkg["obj"][non_qcd],  qcd["obj"]], dim=0),
+        "label": torch.cat([bkg["label"][non_qcd],
+                             torch.ones(n_qcd, dtype=bkg["label"].dtype)], dim=0),
+    }
+    print(f"  Total eval events: {merged['pf'].shape[0]}", flush=True)
+    return merged
+
 # Map filename keywords → physics display names
 _SIGNAL_DISPLAY_NAMES = {
     "TpTp":     "T'T'",
@@ -92,10 +131,10 @@ def profile_plot(ax, x, y, nbins=30, logx=False, min_per_bin=20, label="mean ± 
 # AE inference from joint checkpoint
 # ─────────────────────────────────────────────
 
-def compute_ae_scores(ckpt, test_pt_path, device="cpu", batch_size=4096):
+def compute_ae_scores(ckpt, data_or_path, device="cpu", batch_size=4096):
     """
     Loads the AE stored in a joint checkpoint, runs inference on the obj features
-    from test_pt_path, and returns per-event MSE reco loss.
+    from data_or_path (path string or pre-loaded dict), and returns per-event MSE reco loss.
     """
     ae_sd = ckpt["ae"]
 
@@ -126,7 +165,7 @@ def compute_ae_scores(ckpt, test_pt_path, device="cpu", batch_size=4096):
     mu  = scaler["mu"].cpu().numpy()
     std = scaler["std"].cpu().numpy()
 
-    data = torch.load(test_pt_path, map_location="cpu")
+    data = _load_pt(data_or_path)
     obj = data["obj"][:, :, :4].reshape(data["obj"].shape[0], -1).float().numpy()
     obj_norm = torch.from_numpy(((obj - mu) / (std + 1e-8)).astype(np.float32))
     N = obj_norm.shape[0]
@@ -208,13 +247,14 @@ def build_contrastive_model(ckpt, device="cpu"):
     return encoder, projector
 
 
-def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=512):
-    """Run encoder on a .pt file, return (latents [N, D], labels [N])."""
-    data = torch.load(pt_path, map_location="cpu")
+def embed_dataset(encoder, projector, data_or_path, device="cpu", batch_size=512):
+    """Run encoder on a .pt file or pre-loaded dict, return (latents [N, D], labels [N])."""
+    data   = _load_pt(data_or_path)
     pf     = data["pf"]
     labels = data["label"]
     N = pf.shape[0]
-    print(f"  Running inference on {N} events from {pt_path}...", flush=True)
+    src = data_or_path if isinstance(data_or_path, str) else "merged dataset"
+    print(f"  Running inference on {N} events from {src}...", flush=True)
     latents = []
     with torch.no_grad():
         for i0 in range(0, N, batch_size):
@@ -229,39 +269,76 @@ def embed_dataset(encoder, projector, pt_path, device="cpu", batch_size=512):
     return torch.cat(latents, dim=0).numpy(), labels.numpy()
 
 
-def compute_md_scores(ckpt_path, test_pt_path, device="cpu", batch_size=512, n_pca=None):
+def _fit_class_transform(embeddings, mask, n_pca, class_name):
+    """Fit PCA whitening on embeddings[mask]. Returns (mu, W)."""
+    ref = embeddings[mask]
+    print(f"  Fitting PCA whitening on {mask.sum()} {class_name} events (dim={ref.shape[1]})...", flush=True)
+    mu = ref.mean(axis=0)
+    centered = ref - mu
+    cov = (centered.T @ centered) / ref.shape[0]
+    L, V = np.linalg.eigh(cov)
+    if n_pca is not None:
+        V = V[:, -n_pca:]
+        L = L[-n_pca:]
+        print(f"    Using top {n_pca} PCA components", flush=True)
+    L = np.clip(L, 1e-6, None)
+    W = V / np.sqrt(L)
+    return mu, W
+
+
+def compute_md_scores(ckpt_path, data_or_path, device="cpu", batch_size=512, n_pca=None,
+                      bkg_labels=None):
     """
-    Runs encoder on test_pt_path, fits PCA whitening on QCD (label==1) latents,
-    and returns per-event PCA-whitened MD scores (= squared Euclidean in whitened space).
-    Also returns the fitted (mu, W) and model objects for reuse on signal.
-    n_pca: number of top PCA components to keep (None = keep all).
+    Runs encoder on data_or_path, fits PCA whitening per background class, and returns
+    per-event MD scores.
+
+    bkg_labels: list of class labels to use as background reference.
+      - [1]       (default) → existing behaviour: MD from QCD only.
+      - [0, 1, 3] → min-MD across DY, QCD, WJets (equal-weight minimum).
+
+    Returns md, labels, mu_qcd, W_qcd, encoder, projector, embeddings, class_transforms.
+    class_transforms: list of (label, mu, W) for each bkg class — used for signal inference.
+    mu_qcd / W_qcd are the QCD transforms (kept for visualisation regardless of mode).
     """
+    if bkg_labels is None:
+        bkg_labels = [1]
+
+    _CLASS_NAMES = {0: "DY", 1: "QCD", 2: "TT", 3: "WJets"}
+
     print("Loading checkpoint...", flush=True)
     ckpt = torch.load(ckpt_path, map_location=device)
     encoder, projector = build_contrastive_model(ckpt, device)
 
-    embeddings, labels = embed_dataset(encoder, projector, test_pt_path, device, batch_size)
+    embeddings, labels = embed_dataset(encoder, projector, data_or_path, device, batch_size)
 
-    # fit PCA whitening on QCD (label==1)
-    qcd_mask = (labels == 1)
-    ref = embeddings[qcd_mask]
-    print(f"  Fitting PCA whitening on {qcd_mask.sum()} QCD events (dim={ref.shape[1]})...", flush=True)
-    mu = ref.mean(axis=0)
-    centered = ref - mu
-    cov = (centered.T @ centered) / ref.shape[0]
-    # eigendecompose: L ascending eigenvalues, V eigenvectors as columns
-    L, V = np.linalg.eigh(cov)
-    if n_pca is not None:
-        # keep top n_pca components (eigh returns ascending order, so take from end)
-        V = V[:, -n_pca:]
-        L = L[-n_pca:]
-        print(f"  Using top {n_pca} PCA components for MD", flush=True)
-    L = np.clip(L, 1e-6, None)
-    W = V / np.sqrt(L)             # whitening matrix [D, n_pca]
+    # fit per-class transforms
+    class_transforms = []
+    for cls in bkg_labels:
+        mask = (labels == cls)
+        if mask.sum() < 10:
+            print(f"  WARNING: class {cls} has only {mask.sum()} events — skipping", flush=True)
+            continue
+        mu, W = _fit_class_transform(embeddings, mask, n_pca, _CLASS_NAMES.get(cls, str(cls)))
+        class_transforms.append((cls, mu, W))
 
-    z = (embeddings - mu) @ W      # whitened latents [N, n_pca]
-    md = (z * z).sum(axis=1).astype(np.float32)
-    return md, labels, mu, W, encoder, projector, embeddings
+    if not class_transforms:
+        raise RuntimeError("No background classes with enough events to fit PCA whitening.")
+
+    # compute per-class MD and take element-wise minimum
+    md_per_class = []
+    for cls, mu_c, W_c in class_transforms:
+        z_c = (embeddings - mu_c) @ W_c
+        md_per_class.append((z_c * z_c).sum(axis=1))
+    md = np.stack(md_per_class, axis=0).min(axis=0).astype(np.float32)
+
+    if len(class_transforms) > 1:
+        print(f"  Min-MD across classes {[c for c,_,_ in class_transforms]}", flush=True)
+
+    # QCD transform used for visualisation (corner plots / profile plots)
+    qcd_entry = next((t for t in class_transforms if t[0] == 1), class_transforms[0])
+    mu_qcd, W_qcd = qcd_entry[1], qcd_entry[2]
+
+    return md, labels, mu_qcd, W_qcd, encoder, projector, embeddings, class_transforms
 
 
 # ─────────────────────────────────────────────
@@ -294,13 +371,22 @@ def ABCD(config):
     while len(signal_labels_cfg) < len(signal_pts):
         signal_labels_cfg.append(f"Signal{len(signal_labels_cfg) + 1}")
 
+    # ── min-MD mode: use QCD + DY + WJets as background reference classes ──
+    bkg_labels = [0, 1, 3] if config.get("min_md") else [1]
+    if config.get("min_md"):
+        print("Min-MD mode: axis 2 = min(MD_DY, MD_QCD, MD_WJets)", flush=True)
+
+    # ── build eval dataset (optionally replace QCD with mquinna test data) ──
+    print("Building eval dataset...", flush=True)
+    test_data = load_eval_data(config["contrast_test_pt"], config.get("qcd_pt"))
+
     # ── load checkpoint once (shared by both AE and contrastive inference) ──
     ckpt = torch.load(config["contrast_ckpt"], map_location=device)
 
     # ── AE scores: compute from joint checkpoint if available, else load pre-computed ──
     if "ae" in ckpt and "ae_scaler" in ckpt:
         print("Computing AE scores from joint checkpoint...", flush=True)
-        ae_bkg = compute_ae_scores(ckpt, config["contrast_test_pt"], device=device)
+        ae_bkg = compute_ae_scores(ckpt, test_data, device=device)
     elif config.get("ae_scores_bkg_test"):
         print("Loading pre-computed AE scores...", flush=True)
         ae_bkg = torch.load(config["ae_scores_bkg_test"], map_location="cpu").numpy().astype(np.float32).reshape(-1)
@@ -316,11 +402,12 @@ def ABCD(config):
     ckpt = torch.load(config["contrast_ckpt"], map_location=device)
 
     # ── compute contrastive MD scores ──
-    con_bkg, labels, md_mu, md_W, encoder, projector, embeddings_all = compute_md_scores(
+    con_bkg, labels, md_mu, md_W, encoder, projector, embeddings_all, class_transforms = compute_md_scores(
         config["contrast_ckpt"],
-        config["contrast_test_pt"],
+        test_data,
         device=device,
         n_pca=config.get("n_pca"),
+        bkg_labels=bkg_labels,
     )
 
     if len(con_bkg) != len(ae_bkg):
@@ -358,15 +445,23 @@ def ABCD(config):
         display_label = _signal_display_name(sig_label, sig_pt)
         print(f"Running {display_label} signal inference...", flush=True)
         sig_embeddings, _ = embed_dataset(encoder, projector, sig_pt, device)
-        sig_z   = (sig_embeddings - md_mu) @ md_W
-        sig_con = (sig_z * sig_z).sum(axis=1).astype(np.float32)
+        # compute min-MD across the same background classes used for bkg scoring
+        _sig_md_per_class = []
+        for _, mu_c, W_c in class_transforms:
+            _z_c = (sig_embeddings - mu_c) @ W_c
+            _sig_md_per_class.append((_z_c * _z_c).sum(axis=1))
+        sig_con = np.stack(_sig_md_per_class, axis=0).min(axis=0).astype(np.float32)
         sig_ae  = compute_ae_scores(ckpt, sig_pt, device=device)
         sig_mask = np.isfinite(sig_ae) & np.isfinite(sig_con) & (sig_ae > 0)
         sig_axis1      = sig_ae[sig_mask]
         sig_axis2      = sig_con[sig_mask]
         sig_emb_masked = sig_embeddings[sig_mask]
-        sig_emb_pca    = (sig_emb_masked - md_mu) @ md_W
-        sig_axis2_pca  = (sig_emb_pca * sig_emb_pca).sum(axis=1).astype(np.float32)
+        sig_emb_pca    = (sig_emb_masked - md_mu) @ md_W   # QCD whitening for visualisation
+        _sig_pca_per_class = []
+        for _, mu_c, W_c in class_transforms:
+            _z_c = (sig_emb_masked - mu_c) @ W_c
+            _sig_pca_per_class.append((_z_c * _z_c).sum(axis=1))
+        sig_axis2_pca = np.stack(_sig_pca_per_class, axis=0).min(axis=0).astype(np.float32)
         print(f"  {display_label} events after masking: {sig_mask.sum()}", flush=True)
         signals.append({
             "label":    display_label,
@@ -921,7 +1016,13 @@ def ABCD(config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--contrast_ckpt",      required=True)
-    parser.add_argument("--contrast_test_pt",   required=True)
+    parser.add_argument("--contrast_test_pt",   required=True,
+                        help="Path to SM cocktail test .pt (DY/QCD/TT/WJets). "
+                             "If --qcd_pt is given, the QCD events here are replaced.")
+    parser.add_argument("--qcd_pt",             default=None,
+                        help="Path to a separate QCD-only .pt file (e.g. mquinna test slice). "
+                             "Its events replace QCD (label==1) from --contrast_test_pt, "
+                             "so DY/TT/WJets still come from the smcocktail test file.")
     parser.add_argument("--ae_scores_bkg_test", default=None,
                         help="Pre-computed AE scores .pt file. Not needed if checkpoint contains a joint AE.")
     parser.add_argument("--signal_pt", nargs="*", default=None,
@@ -933,6 +1034,8 @@ if __name__ == "__main__":
     parser.add_argument("--min_D", type=int,    default=1000)
     parser.add_argument("--n_pca", type=int,    default=None,
                         help="Override pca_n_components from checkpoint. Use 6 for full-dim PCA.")
+    parser.add_argument("--min_md",            action="store_true",
+                        help="Axis 2 = min(MD_DY, MD_QCD, MD_WJets) instead of QCD-only MD.")
     parser.add_argument("--raw_md_axis2",      action="store_true",
                         help="Use raw Mahalanobis distance as axis 2 instead of PCA-MD.")
     parser.add_argument("--skip_embedding_pca", action="store_true",
