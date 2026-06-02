@@ -662,7 +662,7 @@ def ABCD(config):
             kde = gaussian_kde(np.vstack([lx, ly]))
             zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
             ax.contour(10**xi_global, 10**yi_global, zi.reshape(xi_global.shape),
-                       colors=color, alpha=0.7, linewidths=1.5)
+                       levels=6, colors=color, alpha=0.7, linewidths=1.5)
             kde_legend_handles.append(Line2D([0], [0], color=color, linewidth=1.5, label=name))
 
         for sig in signals:
@@ -679,7 +679,7 @@ def ABCD(config):
             kde = gaussian_kde(np.vstack([lx, ly]))
             zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
             ax.contour(10**xi_global, 10**yi_global, zi.reshape(xi_global.shape),
-                       colors=color, alpha=0.7, linewidths=1.5)
+                       levels=6, colors=color, alpha=0.7, linewidths=1.5)
             kde_legend_handles.append(Line2D([0], [0], color=color, linewidth=1.5, label=sig["label"]))
 
         ax.set_xscale("log"); ax.set_yscale("log")
@@ -756,7 +756,7 @@ def ABCD(config):
             kde = gaussian_kde(np.vstack([x, y]))
             zi = kde(np.vstack([xi_g.flatten(), yi_g.flatten()]))
             ax.contour(xi_g, yi_g, zi.reshape(xi_g.shape),
-                       colors=class_colors[cls], alpha=0.7, linewidths=1.5)
+                       levels=6, colors=class_colors[cls], alpha=0.7, linewidths=1.5)
             legend_handles.append(
                 Line2D([0], [0], color=class_colors[cls], linewidth=1.5, label=name)
             )
@@ -771,7 +771,7 @@ def ABCD(config):
             kde_s = gaussian_kde(np.vstack([xs, ys]))
             zi_s = kde_s(np.vstack([xi_g.flatten(), yi_g.flatten()]))
             ax.contour(xi_g, yi_g, zi_s.reshape(xi_g.shape),
-                       colors=sig["color"], alpha=0.7, linewidths=1.5)
+                       levels=6, colors=sig["color"], alpha=0.7, linewidths=1.5)
             legend_handles.append(
                 Line2D([0], [0], color=sig["color"], linewidth=1.5, label=sig["label"])
             )
