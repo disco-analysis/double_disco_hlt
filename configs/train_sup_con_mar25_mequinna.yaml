@@ -1,0 +1,36 @@
+model_name: embedding_hlt_linformer_supcon_mar25_mequinna
+
+data:
+  val_split: 0.1
+  pairwise: false
+  preproc_type: PFPreProcessor
+
+hyperparameters:
+  num_epochs: 100
+  early_stopping_patience: 15
+  contrast_loss: SupConLoss
+  lr: 0.0007210235765362034
+  lr_min: 0.0001
+  lr_warmup: 0.05
+  batch_size: 4096
+  num_heads: 8
+  num_layers: 4
+  embed_size: 128
+  dim_feedforward: 512
+  latent_dim: 6
+  proj_dim: 6
+  linear_dim: 16
+  contrast_temp: 0.020575144215717007
+  contrastive_weight: 0.05
+  contrastive_max: 0.10
+  contrastive_warmup: 0.05
+  mixed_prec: false
+  # double DisCo — best sweep values
+  disco_weight: 0.3632346448739996
+  closure_weight: 0.1064547310746046
+  disco_warmup: 0.4
+  closure_warmup: 0.2
+  ae_reco_weight: 1.0
+  ae_latent: 16
+  ae_enc_nodes: [512, 256]
+  ae_dec_nodes: [256, 512]
