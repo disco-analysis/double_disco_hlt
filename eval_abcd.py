@@ -662,7 +662,7 @@ def ABCD(config):
             kde = gaussian_kde(np.vstack([lx, ly]))
             zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
             zi_grid = zi.reshape(xi_global.shape)
-            levels = zi_grid.max() * np.array([0.05, 0.15, 0.4, 0.75])
+            levels = zi_grid.max() * np.array([0.05, 0.15, 0.3, 0.5, 0.7, 0.88])
             ax.contour(10**xi_global, 10**yi_global, zi_grid,
                        levels=levels, colors=color, alpha=0.7, linewidths=1.5)
             kde_legend_handles.append(Line2D([0], [0], color=color, linewidth=1.5, label=name))
@@ -681,7 +681,7 @@ def ABCD(config):
             kde = gaussian_kde(np.vstack([lx, ly]))
             zi = kde(np.vstack([xi_global.flatten(), yi_global.flatten()]))
             zi_grid = zi.reshape(xi_global.shape)
-            levels = zi_grid.max() * np.array([0.05, 0.15, 0.4, 0.75])
+            levels = zi_grid.max() * np.array([0.05, 0.15, 0.3, 0.5, 0.7, 0.88])
             ax.contour(10**xi_global, 10**yi_global, zi_grid,
                        levels=levels, colors=color, alpha=0.7, linewidths=1.5)
             kde_legend_handles.append(Line2D([0], [0], color=color, linewidth=1.5, label=sig["label"]))
@@ -760,7 +760,7 @@ def ABCD(config):
             kde = gaussian_kde(np.vstack([x, y]))
             zi = kde(np.vstack([xi_g.flatten(), yi_g.flatten()]))
             zi_grid = zi.reshape(xi_g.shape)
-            levels = zi_grid.max() * np.array([0.05, 0.15, 0.4, 0.75])
+            levels = zi_grid.max() * np.array([0.05, 0.15, 0.3, 0.5, 0.7, 0.88])
             ax.contour(xi_g, yi_g, zi_grid,
                        levels=levels, colors=class_colors[cls], alpha=0.7, linewidths=1.5)
             legend_handles.append(
@@ -777,7 +777,7 @@ def ABCD(config):
             kde_s = gaussian_kde(np.vstack([xs, ys]))
             zi_s = kde_s(np.vstack([xi_g.flatten(), yi_g.flatten()]))
             zi_s_grid = zi_s.reshape(xi_g.shape)
-            levels_s = zi_s_grid.max() * np.array([0.05, 0.15, 0.4, 0.75])
+            levels_s = zi_s_grid.max() * np.array([0.05, 0.15, 0.3, 0.5, 0.7, 0.88])
             ax.contour(xi_g, yi_g, zi_s_grid,
                        levels=levels_s, colors=sig["color"], alpha=0.7, linewidths=1.5)
             legend_handles.append(
