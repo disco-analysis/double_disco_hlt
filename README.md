@@ -1,53 +1,84 @@
-## Learning Representation
+# Double DisCo HLT Anomaly Detection
 
-The goal is to create representations of physics events which are more sensitive to New Physics than those currently used.  
-
-Traditional supervised learning requires labelled data and is limited in generalisation to unseen physics. Our objective is to learn a **semantically meaningful representation** of each event without explicit labels, so that:
-
-- Signal/background separation becomes linearly separable.
-- Anomalies (e.g., exotic decays) can be detected via unsupervised scoring.
+An anomaly detection analysis using a two-axis ABCD background estimation method. Axis 1 is the AE reconstruction loss (how anomalous an event looks) and axis 2 is a contrastive model (Axo HLT model) score (what type of event it is). DisCo is used to decorrelate the two axes so the ABCD method is valid.
 
 ---
 
-## Method: Masked Particle Modelling (JEPA-like)
+### Axis 1 — Autoencoder (density estimation)
 
-We use a strategy based on **masked-particle prediction**, where:
+An MLP autoencoder trained on object-level features (pT, η, φ). Events that reconstruct poorly are flagged as anomalous.
 
-- A subset of PUPPI candidates is masked.
-- The model is trained to predict the representation of the masked candidates based on the context.
+### Axis 2 — Contrastive encoder (clustering)
 
-This forces the model to learn event-level structure and particle correlations in the latent space.
+A Linformer-based Transformer encodes the PF candidates into a low-dimensional latent vector. Training uses:
 
-However, because particle features are drawn from complex distributions that are difficult to model, the prediction takes place in latent space.
+- **Supervised Contrastive Loss (SupCon)** — clusters events by class in latent space
+- **Cross-Entropy Loss** — sharpens class boundaries via a joint classification head
 
-### Architecture Diagram
+The anomaly score on this axis is the squared Mahalanobis distance of an event's latent vector from the QCD cluster, computed by fitting PCA on the QCD events in each mini-batch and measuring the squared Euclidean distance in the whitened space.
 
-![JEPA Framework Diagram](https://images.prismic.io/encord/64b9cc18-dcb9-4fd1-95c4-c5f34f4f0877_image8.png?auto=compress,format)
+### DisCo decorrelation
 
-*Just instead of pixels, we have particles.*
+For ABCD to work the two axes need to be statistically independent in the background. DisCo enforces this by penalising dependence between the AE reco loss and the Mahalanobis distance on QCD events:
 
-### Losses Used
-
-1. **Latent Prediction Loss** (JEPA style):  
-   Predict masked latent vectors directly rather than original features.  
-   See: [I-JEPA: Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture](https://arxiv.org/abs/2301.08243)
-
-2. **DeepCluster-style Clustering Loss** ([Caron et al., 2018](https://arxiv.org/abs/1807.05520)):  
-   Encourages compact, separable cluster structures in latent space. Target clusters are formed from particle feature clusters to provide weak supervision.
+- **DisCo loss** — minimises distance correlation between the two axes
+- **Closure loss** — directly penalises ABCD nonclosure
 
 ---
 
-## Reinforcement Learning Fine-Tuning (WIP)
+## Setup
 
-During fine-tuning, I experiment with **reinforcement learning (RL)**, where an agent learns:
+```bash
+pip install -e .
+pip install -r nrp/requirements_nrp.txt
+```
 
-- Which particles to mask to maximise separation.
-- Reward is based on linear probe classification accuracy in latent space.
-
-This leads to **adaptive masking policies** that exploit physics-specific cues to optimise downstream performance.
+Requires Python ≥ 3.9 and PyTorch ≥ 2.3.1.
 
 ---
-To run training on a Kubernetes cluster, use the manifest:
-```kubeflow/jepa_rl_pipeline.yaml```
 
-this Docker container can be used: https://gitlab.cern.ch/groups/cms-phase2-repr-learning/-/container_registries
+## Training
+
+```bash
+python train_pca_per_batch.py \
+    --train_cfg configs/train_sup_con_ce.yaml \
+    --data_cfg configs/data_smcocktail.yaml \
+    --data /axovol/contrastive_axis/data/hlt_smcocktail_train.pt
+```
+
+### Key config options
+
+```yaml
+hyperparameters:
+  contrast_loss: SupConLoss
+  contrastive_weight: 0.05    # balance between contrastive and CE loss
+  disco_weight: 0.1           # decorrelation strength
+  closure_weight: 0.1         # ABCD closure penalty
+  disco_warmup: 0.2           # fraction of steps to ramp disco weight from zero
+  pca_components: 6           # PCA dims for Mahalanobis distance
+  ae_latent: 16               # AE bottleneck size
+  latent_dim: 6               # encoder output dimension
+```
+
+---
+
+## Running on NRP-Nautilus
+
+```bash
+kubectl apply -f nrp/train_job_mar25.yaml
+```
+
+Jobs mount the `/axovol` PVC for both code and data. Checkpoints go to `checkpoints/`, logs to `logs/`. Runs are tracked with W&B.
+
+---
+
+## Evaluation
+
+```bash
+python eval_abcd.py \
+    --contrast_ckpt checkpoints/<run>.pth \
+    --contrast_test_pt /axovol/contrastive_axis/data/hlt_smcocktail_test.pt \
+    --signal_pt /axovol/contrastive_axis/data/signal_pt/hlt_signal_TpTp.pt \
+    --outdir /axovol/contrastive_axis/abcd_outputs/<run> \
+    --n_pca 6
+```
