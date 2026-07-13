@@ -7,10 +7,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.decomposition import PCA
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
-from embedding.dataloader import PFCandsDataset, PUPPIDataset
-from embedding.loss import distance_corr
-from embedding.utils.data_utils import delta_r_from_normalized
-from embedding.utils.data_utils import EPS
+from embedding_pca_epoch.dataloader import PFCandsDataset, PUPPIDataset
+from embedding_pca_epoch.loss import distance_corr
+from embedding_pca_epoch.utils.data_utils import delta_r_from_normalized
+from embedding_pca_epoch.utils.data_utils import EPS
 from typing import Union
 
 class EarlyStopping:

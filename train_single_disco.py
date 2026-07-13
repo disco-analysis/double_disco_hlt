@@ -7,17 +7,17 @@ import argparse
 import importlib
 import wandb
 import numpy as np
-from embedding.models import TransformerEncoder, Projector
-from embedding.autoencoder import Autoencoder
-from embedding.training import (
+from embedding_pca_epoch.models import TransformerEncoder, Projector
+from embedding_pca_epoch.autoencoder import Autoencoder
+from embedding_pca_epoch.training import (
     make_train_val_split, build_train_val_loaders,
     train_epoch_single_disco, validate_epoch, EarlyStopping,
     cosine_schedule_with_warmup, cosine_constrastive_schedule,
     linear_warmup_weight, fit_qcd_pca,
 )
-from embedding.utils.data_utils import compute_normalization_constants
-from embedding.utils.cfg_handler import train_config, data_config
-from embedding.utils.data_utils import compute_class_weights
+from embedding_pca_epoch.utils.data_utils import compute_normalization_constants
+from embedding_pca_epoch.utils.cfg_handler import train_config, data_config
+from embedding_pca_epoch.utils.data_utils import compute_class_weights
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 os.makedirs("checkpoints", exist_ok=True)
@@ -175,7 +175,7 @@ def main(data_path: str, ae_ckpt_path: str | None, cfg: train_config, cfg_data: 
         label_block   = (_raw['label'][:_n] if _n > 0 else _raw['label']).long()
         feature_block = torch.nan_to_num(feature_block, nan=0.0, posinf=0.0, neginf=0.0)
     else:
-        from embedding.utils.data_utils import clean_data
+        from embedding_pca_epoch.utils.data_utils import clean_data
         data = _raw[:_n] if _n > 0 else _raw
         feature_block, label_block = clean_data(data)
 

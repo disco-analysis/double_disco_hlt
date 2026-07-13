@@ -12,10 +12,10 @@ from scipy.stats import binned_statistic, gaussian_kde
 from sklearn.decomposition import PCA
 from matplotlib.lines import Line2D
 
-from embedding.models import TransformerEncoder, Projector
-from embedding.autoencoder import Autoencoder
-from embedding.preprocs import PFPreProcessor
-from embedding.utils.data_utils import load_data
+from embedding_pca_epoch.models import TransformerEncoder, Projector
+from embedding_pca_epoch.autoencoder import Autoencoder
+from embedding_pca_epoch.preprocs import PFPreProcessor
+from embedding_pca_epoch.utils.data_utils import load_data
 
 _SIG_COLORS = ["tab:purple", "tab:brown", "tab:olive", "tab:pink", "tab:cyan"]
 

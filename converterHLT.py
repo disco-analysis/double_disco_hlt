@@ -11,8 +11,8 @@ import uproot
 import awkward as ak
 from typing import Union
 
-from embedding.utils.cfg_handler import data_config, join_remote
-from embedding.utils.data_utils import softkill, EPS
+from embedding_pca_epoch.utils.cfg_handler import data_config, join_remote
+from embedding_pca_epoch.utils.data_utils import softkill, EPS
 uproot.source.xrootd.XRootDSource.timeout = 480
 
 # Making it possible to log to file as well as to console
